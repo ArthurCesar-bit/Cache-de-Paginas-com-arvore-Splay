@@ -17,7 +17,7 @@ BUILD   := build
 
 # Componentes que já têm teste escrito.
 # A cada ciclo de TDD novo, adicione o nome aqui (ex.: splay disk stats lru).
-TESTS     := splay disk stats lru
+TESTS     := splay disk stats lru cache concurrency
 TEST_BINS := $(addprefix $(BUILD)/test_,$(TESTS))
 
 .PHONY: all test asan stress clean
