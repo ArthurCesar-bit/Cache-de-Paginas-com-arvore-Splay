@@ -6,7 +6,7 @@
 
 CC      := gcc
 CFLAGS  := -std=c11 -Wall -Wextra -Werror -Iinclude -g
-LDFLAGS := -pthread
+LDFLAGS := -pthread -lm
 
 # Sanitizers. ASan e TSan NÃO convivem no mesmo binário -> alvos separados.
 ASAN    := -fsanitize=address,undefined
@@ -17,7 +17,7 @@ BUILD   := build
 
 # Componentes que já têm teste escrito.
 # A cada ciclo de TDD novo, adicione o nome aqui (ex.: splay disk stats lru).
-TESTS     := splay
+TESTS     := splay disk stats lru
 TEST_BINS := $(addprefix $(BUILD)/test_,$(TESTS))
 
 .PHONY: all test asan stress clean
