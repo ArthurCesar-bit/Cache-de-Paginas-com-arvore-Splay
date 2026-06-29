@@ -1,0 +1,898 @@
+/* ===========================================================
+ * Etapa 11 — Medir desempenho
+ * ===========================================================
+ * Rotacao a direita em torno de x (y = x->esq):
+ *
+ *        x                  y
+ *       /                    \
+ *      y          ===>        x
+ *     / \                    / \
+ *    A   B                  B   C
+ *   (B = y->dir antes da rotacao; B passa a ser x->esq depois)
+ *
+ * Rotacao a esquerda em torno de x (y = x->dir):
+ *
+ *      x                    y
+ *       \                  /
+ *        y      ===>      x
+ *       / \               / \
+ *      B   C             A   B
+ *   (B = y->esq antes da rotacao; B passa a ser x->dir depois)
+ *
+ * Em ambos os casos, a funcao retorna o NOVO TOPO da subarvore
+ * (quem assumiu a posicao de x). O campo "raiz" (pai) de cada
+ * no envolvido e atualizado corretamente, inclusive o caso em
+ * que x era a raiz global da arvore (pai == NULL) — nesse caso
+ * quem chama a funcao deve atualizar sua propria variavel
+ * externa "raiz" com o valor retornado.
+ * =========================================================== */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <string.h>
+
+/* ---------------------------------------------------------
+ * Pagina — unidade de dados armazenada em cada no da arvore.
+ * A partir desta etapa, o cache nao guarda mais apenas um
+ * inteiro solto: guarda uma "pagina" completa, identificada
+ * por um id (usado para ordenacao/busca na BST) e um bloco de
+ * dados de tamanho fixo.
+ * --------------------------------------------------------- */
+typedef struct Pagina {
+    int id;
+    char dados[256];
+} Pagina;
+
+typedef struct No {
+    Pagina pagina;
+    struct No *esq;
+    struct No *dir;
+    struct No *pai;   /* ponteiro para o pai deste no (antes chamado "raiz") */
+} No;
+
+/* ---------------------------------------------------------
+ * Estatisticas de desempenho
+ *
+ * Usamos uma variavel global "stats" para nao precisar mudar
+ * a assinatura de funcoes ja existentes (rotacoes, buscarSplay,
+ * etc). As funcoes que afetam cada metrica incrementam os
+ * campos diretamente:
+ *   - buscas:    incrementado em cada chamada de buscarSplay
+ *   - rotacoes:  incrementado dentro de rotacaoDireita/Esquerda
+ *   - hits:      buscarSplay encontrou a chave
+ *   - misses:    buscarSplay NAO encontrou a chave
+ *
+ * tempoTotalAcesso (em segundos) e medido externamente, em
+ * torno das chamadas de buscarSplay, usando clock().
+ * --------------------------------------------------------- */
+typedef struct {
+    long buscas;
+    long rotacoes;
+    long hits;
+    long misses;
+} Estatisticas;
+
+Estatisticas stats = {0, 0, 0, 0};
+double tempoTotalAcesso = 0.0; /* em segundos, acumulado entre buscas medidas */
+
+/* zera todas as estatisticas (util entre rodadas de teste) */
+void resetEstatisticas(void) {
+    stats.buscas = 0;
+    stats.rotacoes = 0;
+    stats.hits = 0;
+    stats.misses = 0;
+    tempoTotalAcesso = 0.0;
+}
+
+/* ---------------------------------------------------------
+ * Criar nó
+ *
+ * Recebe o id da pagina e seus dados (uma string de at[e] 255
+ * caracteres + terminador). Se "dados" for NULL, o bloco de
+ * dados fica vazio (todos os bytes zerados).
+ * --------------------------------------------------------- */
+No *criarNo(int id, const char *dados) {
+    No *novo = (No *) malloc(sizeof(No));
+    if (novo == NULL) {
+        fprintf(stderr, "Erro: falha ao alocar memoria para o no.\n");
+        exit(EXIT_FAILURE);
+    }
+    novo->pagina.id = id;
+    if (dados != NULL) {
+        /* copia no maximo 255 caracteres + terminador nulo, para
+           nunca escrever fora dos limites do vetor de 256 bytes */
+        snprintf(novo->pagina.dados, sizeof(novo->pagina.dados), "%s", dados);
+    } else {
+        novo->pagina.dados[0] = '\0';
+    }
+    novo->esq = NULL;
+    novo->dir = NULL;
+    novo->pai = NULL;
+    return novo;
+}
+
+/* ---------------------------------------------------------
+ * Inserir
+ * --------------------------------------------------------- */
+No *inserir(No *no, int id, const char *dados) {
+    if (no == NULL) {
+        return criarNo(id, dados);
+    }
+
+    if (id < no->pagina.id) {
+        no->esq = inserir(no->esq, id, dados);
+        no->esq->pai = no;
+    } else if (id > no->pagina.id) {
+        no->dir = inserir(no->dir, id, dados);
+        no->dir->pai = no;
+    }
+
+    return no;
+}
+
+/* ---------------------------------------------------------
+ * Buscar
+ * --------------------------------------------------------- */
+No *buscar(No *no, int id) {
+    if (no == NULL || no->pagina.id == id) {
+        return no;
+    }
+
+    if (id < no->pagina.id) {
+        return buscar(no->esq, id);
+    } else {
+        return buscar(no->dir, id);
+    }
+}
+
+/* (a remocao agora e implementada via removerSplay, mais abaixo,
+   apos as rotacoes e o splay, ja que depende deles) */
+
+/* ---------------------------------------------------------
+ * Rotação à direita em torno de x
+ *
+ *      x                y
+ *     /                  \
+ *    y        ===>         x
+ *
+ * Pre-condicao: x != NULL e x->esq != NULL.
+ * Retorna y (novo topo da subarvore).
+ * --------------------------------------------------------- */
+No *rotacaoDireita(No *x) {
+    if (x == NULL || x->esq == NULL) {
+        /* rotacao invalida: nao ha filho esquerdo para subir */
+        return x;
+    }
+
+    stats.rotacoes++;
+
+    No *y = x->esq;
+    No *pai = x->pai;     /* pai original de x, antes da rotacao */
+    No *B   = y->dir;      /* subarvore que muda de "filho de y" para "filho de x" */
+
+    /* y assume o lugar de x */
+    y->dir = x;
+    x->pai = y;
+
+    /* B (antiga subarvore direita de y) passa a ser a subarvore esquerda de x */
+    x->esq = B;
+    if (B != NULL) {
+        B->pai = x;
+    }
+
+    /* y assume o pai que x tinha antes */
+    y->pai = pai;
+    if (pai != NULL) {
+        if (pai->esq == x) {
+            pai->esq = y;
+        } else if (pai->dir == x) {
+            pai->dir = y;
+        }
+    }
+    /* se pai == NULL, x era a raiz global; quem chamou deve
+       atualizar sua variavel raiz para o valor retornado (y) */
+
+    return y;
+}
+
+/* ---------------------------------------------------------
+ * Rotação à esquerda em torno de x
+ *
+ *    x                    y
+ *     \                  /
+ *      y      ===>      x
+ *
+ * Pre-condicao: x != NULL e x->dir != NULL.
+ * Retorna y (novo topo da subarvore).
+ * --------------------------------------------------------- */
+No *rotacaoEsquerda(No *x) {
+    if (x == NULL || x->dir == NULL) {
+        /* rotacao invalida: nao ha filho direito para subir */
+        return x;
+    }
+
+    stats.rotacoes++;
+
+    No *y = x->dir;
+    No *pai = x->pai;     /* pai original de x, antes da rotacao */
+    No *B   = y->esq;      /* subarvore que muda de "filho de y" para "filho de x" */
+
+    /* y assume o lugar de x */
+    y->esq = x;
+    x->pai = y;
+
+    /* B (antiga subarvore esquerda de y) passa a ser a subarvore direita de x */
+    x->dir = B;
+    if (B != NULL) {
+        B->pai = x;
+    }
+
+    /* y assume o pai que x tinha antes */
+    y->pai = pai;
+    if (pai != NULL) {
+        if (pai->esq == x) {
+            pai->esq = y;
+        } else if (pai->dir == x) {
+            pai->dir = y;
+        }
+    }
+    /* se pai == NULL, x era a raiz global; quem chamou deve
+       atualizar sua variavel raiz para o valor retornado (y) */
+
+    return y;
+}
+
+/* ---------------------------------------------------------
+ * splayZig — caso-base do Splay
+ *
+ * Aplica-se quando x e filho DIRETO da raiz (x->pai->pai == NULL,
+ * ou seja, x nao tem "avo"). E o caso mais simples: uma unica
+ * rotacao em torno do pai de x.
+ *
+ * Se x e filho esquerdo do pai:
+ *
+ *      pai                x
+ *     /                    \
+ *    x       ===>           pai
+ *
+ *   (rotacaoDireita(pai))
+ *
+ * Se x e filho direito do pai:
+ *
+ *    pai                    x
+ *      \                   /
+ *       x      ===>      pai
+ *
+ *   (rotacaoEsquerda(pai))
+ *
+ * Apos a rotacao, x assume o lugar do pai. Como o pai de x e a
+ * propria raiz global, x se torna a NOVA raiz — por isso a funcao
+ * recebe **raiz (ponteiro para o ponteiro) e atualiza *raiz = x.
+ * --------------------------------------------------------- */
+void splayZig(No **raiz, No *x) {
+    if (raiz == NULL || x == NULL) {
+        return;
+    }
+
+    No *pai = x->pai;
+    if (pai == NULL) {
+        /* x ja e a raiz; nada a fazer */
+        return;
+    }
+
+    if (pai->esq == x) {
+        /* x e filho esquerdo do pai -> rotacao a direita no pai */
+        rotacaoDireita(pai);
+    } else {
+        /* x e filho direito do pai -> rotacao a esquerda no pai */
+        rotacaoEsquerda(pai);
+    }
+
+    /* apos a rotacao, x subiu e ocupou o lugar do pai. Como o pai
+       era a raiz global, x agora e a nova raiz global. */
+    *raiz = x;
+}
+
+/* ---------------------------------------------------------
+ * splayZigZig — caso em que x e o pai estao na MESMA direcao
+ * em relacao ao avo (esquerda-esquerda ou direita-direita).
+ *
+ * ESQUERDA-ESQUERDA:
+ *
+ *        avo                x
+ *       /                    \
+ *      pai      ===>          pai
+ *     /                         \
+ *    x                           avo
+ *
+ *   Passos: 1) rotacaoDireita(avo)  -> pai sobe, avo desce
+ *           2) rotacaoDireita(pai)  -> x sobe, pai desce
+ *   (NUNCA rotacionar so o x duas vezes; a ordem avo-depois-pai
+ *    e o que caracteriza o Splay e garante o balanceamento
+ *    amortizado.)
+ *
+ * DIREITA-DIREITA (espelho):
+ *
+ *    avo                        x
+ *      \                       /
+ *       pai      ===>        pai
+ *        \                   /
+ *         x                avo
+ *
+ *   Passos: 1) rotacaoEsquerda(avo)
+ *           2) rotacaoEsquerda(pai)
+ *
+ * Pre-condicao: x->pai (pai) != NULL e x->pai->pai (avo) != NULL,
+ * e x esta na MESMA direcao que pai em relacao ao avo. Se a direcao
+ * for diferente (zig-zag), esta funcao nao deve ser usada — esse
+ * caso sera tratado em outra etapa.
+ *
+ * Assim como splayZig, recebe **raiz porque x pode acabar virando
+ * a raiz global (quando avo era a raiz da arvore).
+ * --------------------------------------------------------- */
+void splayZigZig(No **raiz, No *x) {
+    if (raiz == NULL || x == NULL) {
+        return;
+    }
+
+    No *pai = x->pai;
+    if (pai == NULL) {
+        return; /* x ja e a raiz */
+    }
+
+    No *avo = pai->pai;
+    if (avo == NULL) {
+        return; /* nao ha avo: isto seria um caso Zig, nao Zig-Zig */
+    }
+
+    int avoEraRaizGlobal = (avo->pai == NULL);
+
+    if (avo->esq == pai && pai->esq == x) {
+        /* esquerda-esquerda */
+        rotacaoDireita(avo);  /* pai sobe, avo desce */
+        rotacaoDireita(pai);  /* x sobe, pai desce */
+    } else if (avo->dir == pai && pai->dir == x) {
+        /* direita-direita */
+        rotacaoEsquerda(avo); /* pai sobe, avo desce */
+        rotacaoEsquerda(pai); /* x sobe, pai desce */
+    } else {
+        /* direcoes diferentes: isto e um Zig-Zag, nao Zig-Zig.
+           Esta funcao nao trata esse caso. */
+        return;
+    }
+
+    /* se o avo era a raiz global, x agora ocupa esse lugar */
+    if (avoEraRaizGlobal) {
+        *raiz = x;
+    }
+}
+
+/* ---------------------------------------------------------
+ * splayZigZag — caso em que x e o pai estao em direcoes
+ * OPOSTAS em relacao ao avo (esquerda-direita ou direita-esquerda).
+ *
+ * ESQUERDA-DIREITA (pai e filho esquerdo do avo, x e filho
+ * direito do pai):
+ *
+ *      avo                      x
+ *     /                       /   \
+ *    pai        ===>        pai   avo
+ *      \
+ *       x
+ *
+ *   Passos: 1) rotacaoEsquerda(pai) -> x sobe, ocupa o lugar
+ *              do pai, tornando-se filho esquerdo do avo
+ *           2) rotacaoDireita(avo)  -> x sobe de novo, avo e
+ *              o antigo pai ficam como seus dois filhos
+ *   (Diferente do Zig-Zig: aqui rotacionamos o PAI primeiro,
+ *    depois o AVO — e nao o contrario.)
+ *
+ * DIREITA-ESQUERDA (espelho: pai e filho direito do avo, x e
+ * filho esquerdo do pai):
+ *
+ *    avo                        x
+ *      \                      /   \
+ *       pai      ===>       avo   pai
+ *      /
+ *     x
+ *
+ *   Passos: 1) rotacaoDireita(pai)
+ *           2) rotacaoEsquerda(avo)
+ *
+ * Pre-condicao: x->pai (pai) != NULL e x->pai->pai (avo) != NULL,
+ * e x esta em direcao OPOSTA a pai em relacao ao avo. Se a direcao
+ * for igual (zig-zig), esta funcao nao deve ser usada.
+ *
+ * Assim como nos casos anteriores, recebe **raiz porque x pode
+ * acabar virando a raiz global (quando avo era a raiz da arvore).
+ * --------------------------------------------------------- */
+void splayZigZag(No **raiz, No *x) {
+    if (raiz == NULL || x == NULL) {
+        return;
+    }
+
+    No *pai = x->pai;
+    if (pai == NULL) {
+        return; /* x ja e a raiz */
+    }
+
+    No *avo = pai->pai;
+    if (avo == NULL) {
+        return; /* nao ha avo: isto seria um caso Zig, nao Zig-Zag */
+    }
+
+    int avoEraRaizGlobal = (avo->pai == NULL);
+
+    if (avo->esq == pai && pai->dir == x) {
+        /* esquerda-direita */
+        rotacaoEsquerda(pai); /* x sobe, ocupa o lugar do pai */
+        rotacaoDireita(avo);  /* x sobe de novo, acima do avo */
+    } else if (avo->dir == pai && pai->esq == x) {
+        /* direita-esquerda */
+        rotacaoDireita(pai);  /* x sobe, ocupa o lugar do pai */
+        rotacaoEsquerda(avo); /* x sobe de novo, acima do avo */
+    } else {
+        /* mesma direcao: isto e um Zig-Zig, nao Zig-Zag.
+           Esta funcao nao trata esse caso. */
+        return;
+    }
+
+    /* se o avo era a raiz global, x agora ocupa esse lugar */
+    if (avoEraRaizGlobal) {
+        *raiz = x;
+    }
+}
+
+/* ---------------------------------------------------------
+ * splay — algoritmo Splay completo
+ *
+ * Sobe x recursivamente (via while) até que se torne a raiz da
+ * arvore, aplicando a cada iteracao o caso adequado:
+ *
+ *   - SEM avo (x->pai->pai == NULL)        -> Zig
+ *   - COM avo, mesma direcao de x e do pai   -> Zig-Zig
+ *   - COM avo, direcoes opostas               -> Zig-Zag
+ *
+ * Observacao de nomenclatura: o campo que aponta para o pai de
+ * um no, na nossa struct, se chama "raiz" (definido na Etapa 2),
+ * nao "pai". Entao "x->pai == NULL" equivale a "x->pai == NULL"
+ * do pseudocodigo do enunciado: significa que x ja e a raiz
+ * GLOBAL da arvore (nao tem mais pai).
+ * --------------------------------------------------------- */
+void splay(No **raiz, No *x) {
+    if (raiz == NULL || x == NULL) {
+        return;
+    }
+
+    while (x->pai != NULL) {
+        No *pai = x->pai;
+        No *avo = pai->pai;
+
+        if (avo == NULL) {
+            /* Zig: x e filho direto da raiz */
+            splayZig(raiz, x);
+        } else if ((avo->esq == pai && pai->esq == x) ||
+                   (avo->dir == pai && pai->dir == x)) {
+            /* Zig-Zig: x e o pai estao na mesma direcao */
+            splayZigZig(raiz, x);
+        } else {
+            /* Zig-Zag: x e o pai estao em direcoes opostas */
+            splayZigZag(raiz, x);
+        }
+    }
+
+    /* ao final do laco, x->pai == NULL, ou seja, x e a raiz */
+    *raiz = x;
+}
+
+/* ---------------------------------------------------------
+ * buscarSplay — busca com splay
+ *
+ * 1) Localiza o no com a chave procurada (igual a buscar()).
+ * 2) Executa splay() sobre o no encontrado, trazendo-o para
+ *    a raiz da arvore.
+ *
+ * Decisao de design: se a chave NAO existir na arvore, fazemos
+ * splay do ULTIMO no visitado durante a busca (o no onde a busca
+ * parou, que seria o pai do lugar em que a chave entraria caso
+ * fosse inserida). Essa e a pratica usual em Splay Trees: mantem
+ * a propriedade de localidade temporal mesmo em buscas que falham
+ * — uma chave "vizinha" da procurada sobe ao topo, o que e
+ * especialmente util quando esta arvore for usada como cache de
+ * paginas (Etapa futura).
+ *
+ * Retorna o no encontrado (com a chave correta), ou NULL se a
+ * arvore estiver vazia ou a chave nao existir (mas, neste ultimo
+ * caso, o splay do ultimo no visitado ainda assim acontece).
+ * --------------------------------------------------------- */
+No *buscarSplay(No **raiz, int id) {
+    if (raiz == NULL || *raiz == NULL) {
+        return NULL;
+    }
+
+    clock_t inicio = clock();
+
+    stats.buscas++;
+
+    No *atual = *raiz;
+    No *ultimoVisitado = atual;
+
+    while (atual != NULL && atual->pagina.id != id) {
+        ultimoVisitado = atual;
+        if (id < atual->pagina.id) {
+            atual = atual->esq;
+        } else {
+            atual = atual->dir;
+        }
+    }
+
+    No *resultado;
+    if (atual != NULL) {
+        /* chave encontrada: splay no proprio no */
+        stats.hits++;
+        splay(raiz, atual);
+        resultado = atual;
+    } else {
+        /* chave nao encontrada: splay no ultimo no visitado */
+        stats.misses++;
+        splay(raiz, ultimoVisitado);
+        resultado = NULL;
+    }
+
+    clock_t fim = clock();
+    tempoTotalAcesso += (double) (fim - inicio) / CLOCKS_PER_SEC;
+
+    return resultado;
+}
+
+/* ---------------------------------------------------------
+ * inserirSplay — insercao com splay
+ *
+ * 1) Insere a chave normalmente (igual a inserir()), mas de
+ *    forma ITERATIVA — assim ja guardamos o ponteiro exato do
+ *    no recem-criado, sem precisar buscar de novo depois.
+ * 2) Executa splay() sobre esse no, trazendo-o para a raiz.
+ *
+ * Decisao de design: se a chave JA EXISTIR na arvore (nao havera
+ * insercao de duplicado, igual ao comportamento de inserir()),
+ * ainda assim fazemos splay no no existente com aquela chave.
+ * Isso mantem o comportamento consistente: toda operacao que
+ * "toca" em uma chave (ache ela ja la ou crie ela agora) traz
+ * aquele no para o topo.
+ *
+ * Retorna o no que ficou na raiz (o recem-inserido, ou o
+ * preexistente, em caso de chave duplicada).
+ * --------------------------------------------------------- */
+No *inserirSplay(No **raiz, int id, const char *dados) {
+    if (raiz == NULL) {
+        return NULL;
+    }
+
+    if (*raiz == NULL) {
+        /* arvore vazia: o novo no nasce direto como raiz */
+        *raiz = criarNo(id, dados);
+        return *raiz;
+    }
+
+    No *atual = *raiz;
+    No *pai = NULL;
+
+    while (atual != NULL && atual->pagina.id != id) {
+        pai = atual;
+        if (id < atual->pagina.id) {
+            atual = atual->esq;
+        } else {
+            atual = atual->dir;
+        }
+    }
+
+    if (atual != NULL) {
+        /* chave ja existia: nao insere duplicado, so faz splay nela */
+        splay(raiz, atual);
+        return atual;
+    }
+
+    /* chave nao existia: cria o novo no e o conecta ao pai */
+    No *novo = criarNo(id, dados);
+    novo->pai = pai;
+    if (id < pai->pagina.id) {
+        pai->esq = novo;
+    } else {
+        pai->dir = novo;
+    }
+
+    splay(raiz, novo);
+    return novo;
+}
+
+/* ---------------------------------------------------------
+ * maximo — encontra o no com a MAIOR chave de uma subarvore
+ * (o no mais a direita). Usado por removerSplay para unir
+ * as subarvores esquerda e direita apos remover a raiz.
+ * --------------------------------------------------------- */
+No *maximo(No *no) {
+    if (no == NULL) {
+        return NULL;
+    }
+    while (no->dir != NULL) {
+        no = no->dir;
+    }
+    return no;
+}
+
+/* ---------------------------------------------------------
+ * removerSplay — remocao com splay
+ *
+ * Passos (algoritmo classico de remocao em Splay Tree):
+ *   1) Fazer splay da chave a remover -> ela vira a raiz.
+ *      (usamos buscarSplay; se a chave nao existir, a busca
+ *      ainda faz splay do ultimo no visitado, mas detectamos
+ *      que a chave nao foi encontrada e nao removemos nada)
+ *   2) Separar as subarvores esquerda (E) e direita (D) da raiz,
+ *      e liberar a memoria da raiz antiga.
+ *   3) Unir E e D:
+ *        - se E for NULL, a nova raiz e D
+ *        - se D for NULL, a nova raiz e E
+ *        - senao: fazer splay do MAIOR elemento de E (o no mais
+ *          a direita de E). Como esse elemento e o maior de E,
+ *          depois do splay ele fica sem filho direito — entao
+ *          basta encaixar D ali, como seu novo filho direito.
+ *          Isso preserva a propriedade da BST, pois todo elemento
+ *          de E e menor que todo elemento de D.
+ *
+ * Retorna 1 se a chave foi encontrada e removida, ou 0 se a
+ * chave nao existia na arvore (nada e removido nesse caso, mas
+ * a arvore ainda sofre o splay do ultimo no visitado).
+ * --------------------------------------------------------- */
+int removerSplay(No **raiz, int id) {
+    if (raiz == NULL || *raiz == NULL) {
+        return 0;
+    }
+
+    No *encontrado = buscarSplay(raiz, id);
+    if (encontrado == NULL) {
+        /* chave nao existe; buscarSplay ja fez splay do ultimo
+           no visitado, nada mais a fazer aqui */
+        return 0;
+    }
+
+    /* apos o splay, a chave removida e a raiz da arvore */
+    No *raizAntiga = *raiz;
+    No *E = raizAntiga->esq;
+    No *D = raizAntiga->dir;
+
+    if (E != NULL) {
+        E->pai = NULL; /* E passa a ser uma arvore independente */
+    }
+    if (D != NULL) {
+        D->pai = NULL; /* D passa a ser uma arvore independente */
+    }
+
+    free(raizAntiga);
+
+    if (E == NULL) {
+        *raiz = D;
+    } else if (D == NULL) {
+        *raiz = E;
+    } else {
+        /* caso geral: splay do maior elemento de E, depois
+           encaixa D como filho direito desse novo topo */
+        No *maiorDeE = maximo(E);
+        splay(&E, maiorDeE);  /* E agora tem maiorDeE como raiz,
+                                  e maiorDeE->dir == NULL */
+        E->dir = D;
+        D->pai = E;
+        *raiz = E;
+    }
+
+    if (*raiz != NULL) {
+        (*raiz)->pai = NULL; /* a nova raiz global nao tem pai */
+    }
+
+    return 1;
+}
+
+/* ---------------------------------------------------------
+ * somaProfundidades — soma a profundidade de cada no da
+ * subarvore (raiz tem profundidade 0). "qtdNos" acumula
+ * quantos nos foram visitados, para depois calcular a media.
+ * Funcao auxiliar de profundidadeMedia().
+ * --------------------------------------------------------- */
+void somaProfundidades(No *no, int profundidadeAtual, long *somaAcumulada, long *qtdNos) {
+    if (no == NULL) {
+        return;
+    }
+    *somaAcumulada += profundidadeAtual;
+    *qtdNos += 1;
+    somaProfundidades(no->esq, profundidadeAtual + 1, somaAcumulada, qtdNos);
+    somaProfundidades(no->dir, profundidadeAtual + 1, somaAcumulada, qtdNos);
+}
+
+/* ---------------------------------------------------------
+ * profundidadeMedia — calcula a profundidade media dos nos
+ * da arvore (raiz = profundidade 0). Retorna 0.0 para arvore
+ * vazia.
+ * --------------------------------------------------------- */
+double profundidadeMedia(No *raiz) {
+    if (raiz == NULL) {
+        return 0.0;
+    }
+    long soma = 0;
+    long qtd = 0;
+    somaProfundidades(raiz, 0, &soma, &qtd);
+    return (double) soma / (double) qtd;
+}
+
+/* ---------------------------------------------------------
+ * imprimirEstatisticas — exibe um relatorio com as metricas
+ * coletadas em "stats" e o tempo total/medio de acesso.
+ * Recebe a raiz atual para tambem reportar a profundidade media.
+ * --------------------------------------------------------- */
+void imprimirEstatisticas(No *raiz) {
+    printf("----- Estatisticas de desempenho -----\n");
+    printf("  Buscas realizadas : %ld\n", stats.buscas);
+    printf("  Hits              : %ld\n", stats.hits);
+    printf("  Misses            : %ld\n", stats.misses);
+    printf("  Rotacoes          : %ld\n", stats.rotacoes);
+    printf("  Profundidade media: %.3f\n", profundidadeMedia(raiz));
+    printf("  Tempo total acesso: %.6f s\n", tempoTotalAcesso);
+    if (stats.buscas > 0) {
+        printf("  Tempo medio/busca : %.9f s\n", tempoTotalAcesso / (double) stats.buscas);
+    }
+    printf("---------------------------------------\n");
+}
+
+/* ---------------------------------------------------------
+ * Percurso em ordem (in-order)
+ * --------------------------------------------------------- */
+void emOrdem(No *no) {
+    if (no == NULL) {
+        return;
+    }
+    emOrdem(no->esq);
+    printf("%d ", no->pagina.id);
+    emOrdem(no->dir);
+}
+
+/* ---------------------------------------------------------
+ * Liberar memória
+ * --------------------------------------------------------- */
+void liberarArvore(No *no) {
+    if (no == NULL) {
+        return;
+    }
+    liberarArvore(no->esq);
+    liberarArvore(no->dir);
+    free(no);
+}
+
+/* ---------------------------------------------------------
+ * Testes
+ * --------------------------------------------------------- */
+int main(void) {
+    /* ============================================================
+     * TESTE 1 — Estrutura Pagina: criar, inserir e recuperar dados
+     * Confirma que o id continua sendo usado para ordenacao/busca
+     * na BST, e que o conteudo de "dados" e armazenado e
+     * recuperado corretamente junto com cada no.
+     * ============================================================ */
+    printf("=== TESTE 1: estrutura Pagina (id + dados) ===\n");
+
+    No *raiz1 = NULL;
+    raiz1 = inserir(raiz1, 50, "pagina cinquenta");
+    raiz1 = inserir(raiz1, 30, "pagina trinta");
+    raiz1 = inserir(raiz1, 70, "pagina setenta");
+    raiz1 = inserir(raiz1, 20, "pagina vinte");
+    raiz1 = inserir(raiz1, 40, "pagina quarenta");
+
+    printf("Arvore (em ordem, por id): ");
+    emOrdem(raiz1);
+    printf("\n\n");
+
+    No *no30 = buscar(raiz1, 30);
+    No *no70 = buscar(raiz1, 70);
+
+    printf("Verificacoes:\n");
+    printf("  no30 != NULL?                    %s\n",
+           (no30 != NULL) ? "OK" : "FALHOU");
+    printf("  no30->pagina.id == 30?           %s\n",
+           (no30 != NULL && no30->pagina.id == 30) ? "OK" : "FALHOU");
+    printf("  no30->pagina.dados == \"pagina trinta\"? %s (valor=\"%s\")\n",
+           (no30 != NULL && strcmp(no30->pagina.dados, "pagina trinta") == 0) ? "OK" : "FALHOU",
+           no30 != NULL ? no30->pagina.dados : "");
+    printf("  no70->pagina.dados == \"pagina setenta\"? %s (valor=\"%s\")\n",
+           (no70 != NULL && strcmp(no70->pagina.dados, "pagina setenta") == 0) ? "OK" : "FALHOU",
+           no70 != NULL ? no70->pagina.dados : "");
+    printf("  sizeof(no30->pagina.dados) == 256? %s\n",
+           (sizeof(no30->pagina.dados) == 256) ? "OK" : "FALHOU");
+
+    liberarArvore(raiz1);
+
+    /* ============================================================
+     * TESTE 2 — criarNo com dados == NULL deixa o bloco vazio
+     * ============================================================ */
+    printf("\n=== TESTE 2: criarNo com dados == NULL ===\n");
+
+    No *noSemDados = criarNo(99, NULL);
+
+    printf("Verificacoes:\n");
+    printf("  noSemDados->pagina.id == 99?     %s\n",
+           (noSemDados->pagina.id == 99) ? "OK" : "FALHOU");
+    printf("  noSemDados->pagina.dados[0] == 0? %s\n",
+           (noSemDados->pagina.dados[0] == '\0') ? "OK" : "FALHOU");
+
+    free(noSemDados);
+
+    /* ============================================================
+     * TESTE 3 — buscarSplay e inserirSplay continuam funcionando
+     * com base no id da pagina, agora carregando dados tambem.
+     * ============================================================ */
+    printf("\n=== TESTE 3: buscarSplay/inserirSplay com Pagina ===\n");
+
+    resetEstatisticas();
+
+    No *raiz3 = NULL;
+    raiz3 = inserir(raiz3, 50, "pagina 50");
+    raiz3 = inserir(raiz3, 30, "pagina 30");
+    raiz3 = inserir(raiz3, 70, "pagina 70");
+
+    No *encontrado = buscarSplay(&raiz3, 30);
+
+    printf("Verificacoes:\n");
+    printf("  buscarSplay(30) encontrou o no?  %s\n",
+           (encontrado != NULL) ? "OK" : "FALHOU");
+    printf("  dados preservados apos splay?    %s (valor=\"%s\")\n",
+           (encontrado != NULL && strcmp(encontrado->pagina.dados, "pagina 30") == 0) ? "OK" : "FALHOU",
+           encontrado != NULL ? encontrado->pagina.dados : "");
+    printf("  30 e a nova raiz?                %s (id=%d)\n",
+           (raiz3->pagina.id == 30) ? "OK" : "FALHOU", raiz3->pagina.id);
+
+    No *no100 = inserirSplay(&raiz3, 100, "pagina cem, recem-criada");
+
+    printf("  inserirSplay(100) retornou no?   %s\n",
+           (no100 != NULL) ? "OK" : "FALHOU");
+    printf("  100 e a nova raiz?               %s (id=%d)\n",
+           (raiz3->pagina.id == 100) ? "OK" : "FALHOU", raiz3->pagina.id);
+    printf("  dados de 100 armazenados?        %s (valor=\"%s\")\n",
+           (no100 != NULL && strcmp(no100->pagina.dados, "pagina cem, recem-criada") == 0) ? "OK" : "FALHOU",
+           no100 != NULL ? no100->pagina.dados : "");
+
+    liberarArvore(raiz3);
+
+    /* ============================================================
+     * TESTE 4 — Regressao das estatisticas (Etapa 11), garantindo
+     * que a migracao para Pagina nao quebrou rotacoes/hits/misses
+     * ============================================================ */
+    printf("\n=== TESTE 4: regressao de estatisticas apos migracao ===\n");
+
+    resetEstatisticas();
+
+    No *raiz4 = NULL;
+    int idsIniciais[] = {50, 30, 70, 20, 40, 60, 80};
+    for (int i = 0; i < 7; i++) {
+        raiz4 = inserir(raiz4, idsIniciais[i], NULL);
+    }
+
+    buscarSplay(&raiz4, 60);   /* hit */
+    buscarSplay(&raiz4, 20);   /* hit */
+    buscarSplay(&raiz4, 999);  /* miss */
+    buscarSplay(&raiz4, 80);   /* hit */
+    buscarSplay(&raiz4, -5);   /* miss */
+
+    imprimirEstatisticas(raiz4);
+
+    printf("\nVerificacoes:\n");
+    printf("  stats.buscas == 5?         %s (valor=%ld)\n",
+           (stats.buscas == 5) ? "OK" : "FALHOU", stats.buscas);
+    printf("  stats.hits == 3?           %s (valor=%ld)\n",
+           (stats.hits == 3) ? "OK" : "FALHOU", stats.hits);
+    printf("  stats.misses == 2?         %s (valor=%ld)\n",
+           (stats.misses == 2) ? "OK" : "FALHOU", stats.misses);
+    printf("  stats.rotacoes > 0?        %s (valor=%ld)\n",
+           (stats.rotacoes > 0) ? "OK" : "FALHOU", stats.rotacoes);
+
+    liberarArvore(raiz4);
+
+    return 0;
+}
