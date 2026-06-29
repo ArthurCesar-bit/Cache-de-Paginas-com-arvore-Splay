@@ -1,0 +1,174 @@
+/* ===========================================================
+ * Etapa 2 — Adicionar ponteiro para a raiz (pai do no)
+ * ===========================================================
+ * O campo "raiz" dentro de No aponta para o PAI daquele no
+ * especifico (nao confundir com a variavel externa "raiz",
+ * que aponta para o topo da arvore inteira).
+ *
+ * Exemplo: se o no 30 e filho do no 50, entao:
+ *     no30->raiz == no50
+ * =========================================================== */
+
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct No {
+    int chave;
+    struct No *esq;
+    struct No *dir;
+    struct No *raiz;   /* ponteiro para o pai deste no */
+} No;
+
+/* ---------------------------------------------------------
+ * Criar nó
+ * --------------------------------------------------------- */
+No *criarNo(int chave) {
+    No *novo = (No *) malloc(sizeof(No));
+    if (novo == NULL) {
+        fprintf(stderr, "Erro: falha ao alocar memoria para o no.\n");
+        exit(EXIT_FAILURE);
+    }
+    novo->chave = chave;
+    novo->esq = NULL;
+    novo->dir = NULL;
+    novo->raiz = NULL; /* por padrao, sem pai (caso vire a raiz da arvore) */
+    return novo;
+}
+
+/* ---------------------------------------------------------
+ * Inserir
+ * Insercao recursiva classica de BST (sem balanceamento).
+ * "no" representa a raiz da subarvore atual (nao confundir
+ * com o campo no->raiz, que e o ponteiro para o pai).
+ * Ao inserir um filho, seu campo raiz e ajustado para apontar
+ * para o no atual.
+ * --------------------------------------------------------- */
+No *inserir(No *no, int chave) {
+    if (no == NULL) {
+        return criarNo(chave);
+    }
+
+    if (chave < no->chave) {
+        no->esq = inserir(no->esq, chave);
+        no->esq->raiz = no;   /* atualiza o pai do filho esquerdo */
+    } else if (chave > no->chave) {
+        no->dir = inserir(no->dir, chave);
+        no->dir->raiz = no;   /* atualiza o pai do filho direito */
+    }
+    /* chave == no->chave: nao insere duplicado */
+
+    return no;
+}
+
+/* ---------------------------------------------------------
+ * Buscar
+ * Retorna o ponteiro para o no encontrado, ou NULL se nao existir.
+ * Nao precisa de ajuste: apenas percorre a arvore, nao altera pais.
+ * --------------------------------------------------------- */
+No *buscar(No *no, int chave) {
+    if (no == NULL || no->chave == chave) {
+        return no;
+    }
+
+    if (chave < no->chave) {
+        return buscar(no->esq, chave);
+    } else {
+        return buscar(no->dir, chave);
+    }
+}
+
+/* ---------------------------------------------------------
+ * Remoção (opcional por enquanto)
+ * Assinatura reservada para uma proxima etapa. Quando for
+ * implementada, precisara reatribuir o campo raiz dos nos
+ * que mudarem de posicao (ex.: filho que sobe para o lugar
+ * do no removido).
+ * --------------------------------------------------------- */
+No *remover(No *no, int chave) {
+    (void) no;
+    (void) chave;
+    /* TODO: implementar em etapa futura */
+    return no;
+}
+
+/* ---------------------------------------------------------
+ * Percurso em ordem (in-order)
+ * --------------------------------------------------------- */
+void emOrdem(No *no) {
+    if (no == NULL) {
+        return;
+    }
+    emOrdem(no->esq);
+    printf("%d ", no->chave);
+    emOrdem(no->dir);
+}
+
+/* ---------------------------------------------------------
+ * Liberar memória
+ * --------------------------------------------------------- */
+void liberarArvore(No *no) {
+    if (no == NULL) {
+        return;
+    }
+    liberarArvore(no->esq);
+    liberarArvore(no->dir);
+    free(no);
+}
+
+/* ---------------------------------------------------------
+ * Testes
+ * --------------------------------------------------------- */
+int main(void) {
+    No *raiz = NULL;
+
+    int valores[] = {50, 30, 70, 20, 40, 60, 80};
+    int n = sizeof(valores) / sizeof(valores[0]);
+
+    printf("Inserindo valores: ");
+    for (int i = 0; i < n; i++) {
+        printf("%d ", valores[i]);
+        raiz = inserir(raiz, valores[i]);
+    }
+    printf("\n\n");
+
+    printf("Percurso em ordem (deve sair crescente): ");
+    emOrdem(raiz);
+    printf("\n\n");
+
+    /* ---- Testes de busca pelo pai (campo "raiz" do no) ---- */
+    No *no20 = buscar(raiz, 20);
+    No *no30 = buscar(raiz, 30);
+    No *no50 = buscar(raiz, 50);
+
+    printf("Teste 1: 20->raiz deve ser 30\n");
+    if (no20 != NULL && no20->raiz != NULL) {
+        printf("  Resultado: 20->raiz == %d  =>  %s\n",
+               no20->raiz->chave,
+               (no20->raiz->chave == 30) ? "OK" : "FALHOU");
+    } else {
+        printf("  Resultado: FALHOU (no nulo)\n");
+    }
+
+    printf("Teste 2: 30->raiz deve ser 50\n");
+    if (no30 != NULL && no30->raiz != NULL) {
+        printf("  Resultado: 30->raiz == %d  =>  %s\n",
+               no30->raiz->chave,
+               (no30->raiz->chave == 50) ? "OK" : "FALHOU");
+    } else {
+        printf("  Resultado: FALHOU (no nulo)\n");
+    }
+
+    printf("Teste 3: 50 e a raiz da arvore, logo 50->raiz deve ser NULL\n");
+    if (no50 != NULL) {
+        printf("  Resultado: 50->raiz == %s  =>  %s\n",
+               (no50->raiz == NULL) ? "NULL" : "nao-NULL",
+               (no50->raiz == NULL) ? "OK" : "FALHOU");
+    }
+
+    printf("\nLiberando memoria da arvore...\n");
+    liberarArvore(raiz);
+    raiz = NULL;
+    printf("Memoria liberada com sucesso.\n");
+
+    return 0;
+}
