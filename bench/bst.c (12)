@@ -1,0 +1,1092 @@
+/* ===========================================================
+ * Etapa 13 — Implementar Cache de Páginas
+ * ===========================================================
+ * Rotacao a direita em torno de x (y = x->esq):
+ *
+ *        x                  y
+ *       /                    \
+ *      y          ===>        x
+ *     / \                    / \
+ *    A   B                  B   C
+ *   (B = y->dir antes da rotacao; B passa a ser x->esq depois)
+ *
+ * Rotacao a esquerda em torno de x (y = x->dir):
+ *
+ *      x                    y
+ *       \                  /
+ *        y      ===>      x
+ *       / \               / \
+ *      B   C             A   B
+ *   (B = y->esq antes da rotacao; B passa a ser x->dir depois)
+ *
+ * Em ambos os casos, a funcao retorna o NOVO TOPO da subarvore
+ * (quem assumiu a posicao de x). O campo "raiz" (pai) de cada
+ * no envolvido e atualizado corretamente, inclusive o caso em
+ * que x era a raiz global da arvore (pai == NULL) — nesse caso
+ * quem chama a funcao deve atualizar sua propria variavel
+ * externa "raiz" com o valor retornado.
+ * =========================================================== */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <string.h>
+
+/* ---------------------------------------------------------
+ * Pagina — unidade de dados armazenada em cada no da arvore.
+ * A partir desta etapa, o cache nao guarda mais apenas um
+ * inteiro solto: guarda uma "pagina" completa, identificada
+ * por um id (usado para ordenacao/busca na BST) e um bloco de
+ * dados de tamanho fixo.
+ * --------------------------------------------------------- */
+typedef struct Pagina {
+    int id;
+    char dados[256];
+} Pagina;
+
+typedef struct No {
+    Pagina pagina;
+    struct No *esq;
+    struct No *dir;
+    struct No *pai;   /* ponteiro para o pai deste no (antes chamado "raiz") */
+} No;
+
+/* ---------------------------------------------------------
+ * Estatisticas de desempenho
+ *
+ * Usamos uma variavel global "stats" para nao precisar mudar
+ * a assinatura de funcoes ja existentes (rotacoes, buscarSplay,
+ * etc). As funcoes que afetam cada metrica incrementam os
+ * campos diretamente:
+ *   - buscas:    incrementado em cada chamada de buscarSplay
+ *   - rotacoes:  incrementado dentro de rotacaoDireita/Esquerda
+ *   - hits:      buscarSplay encontrou a chave
+ *   - misses:    buscarSplay NAO encontrou a chave
+ *
+ * tempoTotalAcesso (em segundos) e medido externamente, em
+ * torno das chamadas de buscarSplay, usando clock().
+ * --------------------------------------------------------- */
+typedef struct {
+    long buscas;
+    long rotacoes;
+    long hits;
+    long misses;
+} Estatisticas;
+
+Estatisticas stats = {0, 0, 0, 0};
+double tempoTotalAcesso = 0.0; /* em segundos, acumulado entre buscas medidas */
+
+/* zera todas as estatisticas (util entre rodadas de teste) */
+void resetEstatisticas(void) {
+    stats.buscas = 0;
+    stats.rotacoes = 0;
+    stats.hits = 0;
+    stats.misses = 0;
+    tempoTotalAcesso = 0.0;
+}
+
+/* ---------------------------------------------------------
+ * Criar nó
+ *
+ * Recebe o id da pagina e seus dados (uma string de at[e] 255
+ * caracteres + terminador). Se "dados" for NULL, o bloco de
+ * dados fica vazio (todos os bytes zerados).
+ * --------------------------------------------------------- */
+No *criarNo(int id, const char *dados) {
+    No *novo = (No *) malloc(sizeof(No));
+    if (novo == NULL) {
+        fprintf(stderr, "Erro: falha ao alocar memoria para o no.\n");
+        exit(EXIT_FAILURE);
+    }
+    novo->pagina.id = id;
+    if (dados != NULL) {
+        /* copia no maximo 255 caracteres + terminador nulo, para
+           nunca escrever fora dos limites do vetor de 256 bytes */
+        snprintf(novo->pagina.dados, sizeof(novo->pagina.dados), "%s", dados);
+    } else {
+        novo->pagina.dados[0] = '\0';
+    }
+    novo->esq = NULL;
+    novo->dir = NULL;
+    novo->pai = NULL;
+    return novo;
+}
+
+/* ---------------------------------------------------------
+ * Inserir
+ * --------------------------------------------------------- */
+No *inserir(No *no, int id, const char *dados) {
+    if (no == NULL) {
+        return criarNo(id, dados);
+    }
+
+    if (id < no->pagina.id) {
+        no->esq = inserir(no->esq, id, dados);
+        no->esq->pai = no;
+    } else if (id > no->pagina.id) {
+        no->dir = inserir(no->dir, id, dados);
+        no->dir->pai = no;
+    }
+
+    return no;
+}
+
+/* ---------------------------------------------------------
+ * Buscar
+ * --------------------------------------------------------- */
+No *buscar(No *no, int id) {
+    if (no == NULL || no->pagina.id == id) {
+        return no;
+    }
+
+    if (id < no->pagina.id) {
+        return buscar(no->esq, id);
+    } else {
+        return buscar(no->dir, id);
+    }
+}
+
+/* ---------------------------------------------------------
+ * Liberar memória
+ * (movida para perto do topo do arquivo, pois liberarCache
+ * precisa dela e e definida antes do bloco de Splay/Cache)
+ * --------------------------------------------------------- */
+void liberarArvore(No *no) {
+    if (no == NULL) {
+        return;
+    }
+    liberarArvore(no->esq);
+    liberarArvore(no->dir);
+    free(no);
+}
+
+/* (a remocao agora e implementada via removerSplay, mais abaixo,
+   apos as rotacoes e o splay, ja que depende deles) */
+
+/* ---------------------------------------------------------
+ * Rotação à direita em torno de x
+ *
+ *      x                y
+ *     /                  \
+ *    y        ===>         x
+ *
+ * Pre-condicao: x != NULL e x->esq != NULL.
+ * Retorna y (novo topo da subarvore).
+ * --------------------------------------------------------- */
+No *rotacaoDireita(No *x) {
+    if (x == NULL || x->esq == NULL) {
+        /* rotacao invalida: nao ha filho esquerdo para subir */
+        return x;
+    }
+
+    stats.rotacoes++;
+
+    No *y = x->esq;
+    No *pai = x->pai;     /* pai original de x, antes da rotacao */
+    No *B   = y->dir;      /* subarvore que muda de "filho de y" para "filho de x" */
+
+    /* y assume o lugar de x */
+    y->dir = x;
+    x->pai = y;
+
+    /* B (antiga subarvore direita de y) passa a ser a subarvore esquerda de x */
+    x->esq = B;
+    if (B != NULL) {
+        B->pai = x;
+    }
+
+    /* y assume o pai que x tinha antes */
+    y->pai = pai;
+    if (pai != NULL) {
+        if (pai->esq == x) {
+            pai->esq = y;
+        } else if (pai->dir == x) {
+            pai->dir = y;
+        }
+    }
+    /* se pai == NULL, x era a raiz global; quem chamou deve
+       atualizar sua variavel raiz para o valor retornado (y) */
+
+    return y;
+}
+
+/* ---------------------------------------------------------
+ * Rotação à esquerda em torno de x
+ *
+ *    x                    y
+ *     \                  /
+ *      y      ===>      x
+ *
+ * Pre-condicao: x != NULL e x->dir != NULL.
+ * Retorna y (novo topo da subarvore).
+ * --------------------------------------------------------- */
+No *rotacaoEsquerda(No *x) {
+    if (x == NULL || x->dir == NULL) {
+        /* rotacao invalida: nao ha filho direito para subir */
+        return x;
+    }
+
+    stats.rotacoes++;
+
+    No *y = x->dir;
+    No *pai = x->pai;     /* pai original de x, antes da rotacao */
+    No *B   = y->esq;      /* subarvore que muda de "filho de y" para "filho de x" */
+
+    /* y assume o lugar de x */
+    y->esq = x;
+    x->pai = y;
+
+    /* B (antiga subarvore esquerda de y) passa a ser a subarvore direita de x */
+    x->dir = B;
+    if (B != NULL) {
+        B->pai = x;
+    }
+
+    /* y assume o pai que x tinha antes */
+    y->pai = pai;
+    if (pai != NULL) {
+        if (pai->esq == x) {
+            pai->esq = y;
+        } else if (pai->dir == x) {
+            pai->dir = y;
+        }
+    }
+    /* se pai == NULL, x era a raiz global; quem chamou deve
+       atualizar sua variavel raiz para o valor retornado (y) */
+
+    return y;
+}
+
+/* ---------------------------------------------------------
+ * splayZig — caso-base do Splay
+ *
+ * Aplica-se quando x e filho DIRETO da raiz (x->pai->pai == NULL,
+ * ou seja, x nao tem "avo"). E o caso mais simples: uma unica
+ * rotacao em torno do pai de x.
+ *
+ * Se x e filho esquerdo do pai:
+ *
+ *      pai                x
+ *     /                    \
+ *    x       ===>           pai
+ *
+ *   (rotacaoDireita(pai))
+ *
+ * Se x e filho direito do pai:
+ *
+ *    pai                    x
+ *      \                   /
+ *       x      ===>      pai
+ *
+ *   (rotacaoEsquerda(pai))
+ *
+ * Apos a rotacao, x assume o lugar do pai. Como o pai de x e a
+ * propria raiz global, x se torna a NOVA raiz — por isso a funcao
+ * recebe **raiz (ponteiro para o ponteiro) e atualiza *raiz = x.
+ * --------------------------------------------------------- */
+void splayZig(No **raiz, No *x) {
+    if (raiz == NULL || x == NULL) {
+        return;
+    }
+
+    No *pai = x->pai;
+    if (pai == NULL) {
+        /* x ja e a raiz; nada a fazer */
+        return;
+    }
+
+    if (pai->esq == x) {
+        /* x e filho esquerdo do pai -> rotacao a direita no pai */
+        rotacaoDireita(pai);
+    } else {
+        /* x e filho direito do pai -> rotacao a esquerda no pai */
+        rotacaoEsquerda(pai);
+    }
+
+    /* apos a rotacao, x subiu e ocupou o lugar do pai. Como o pai
+       era a raiz global, x agora e a nova raiz global. */
+    *raiz = x;
+}
+
+/* ---------------------------------------------------------
+ * splayZigZig — caso em que x e o pai estao na MESMA direcao
+ * em relacao ao avo (esquerda-esquerda ou direita-direita).
+ *
+ * ESQUERDA-ESQUERDA:
+ *
+ *        avo                x
+ *       /                    \
+ *      pai      ===>          pai
+ *     /                         \
+ *    x                           avo
+ *
+ *   Passos: 1) rotacaoDireita(avo)  -> pai sobe, avo desce
+ *           2) rotacaoDireita(pai)  -> x sobe, pai desce
+ *   (NUNCA rotacionar so o x duas vezes; a ordem avo-depois-pai
+ *    e o que caracteriza o Splay e garante o balanceamento
+ *    amortizado.)
+ *
+ * DIREITA-DIREITA (espelho):
+ *
+ *    avo                        x
+ *      \                       /
+ *       pai      ===>        pai
+ *        \                   /
+ *         x                avo
+ *
+ *   Passos: 1) rotacaoEsquerda(avo)
+ *           2) rotacaoEsquerda(pai)
+ *
+ * Pre-condicao: x->pai (pai) != NULL e x->pai->pai (avo) != NULL,
+ * e x esta na MESMA direcao que pai em relacao ao avo. Se a direcao
+ * for diferente (zig-zag), esta funcao nao deve ser usada — esse
+ * caso sera tratado em outra etapa.
+ *
+ * Assim como splayZig, recebe **raiz porque x pode acabar virando
+ * a raiz global (quando avo era a raiz da arvore).
+ * --------------------------------------------------------- */
+void splayZigZig(No **raiz, No *x) {
+    if (raiz == NULL || x == NULL) {
+        return;
+    }
+
+    No *pai = x->pai;
+    if (pai == NULL) {
+        return; /* x ja e a raiz */
+    }
+
+    No *avo = pai->pai;
+    if (avo == NULL) {
+        return; /* nao ha avo: isto seria um caso Zig, nao Zig-Zig */
+    }
+
+    int avoEraRaizGlobal = (avo->pai == NULL);
+
+    if (avo->esq == pai && pai->esq == x) {
+        /* esquerda-esquerda */
+        rotacaoDireita(avo);  /* pai sobe, avo desce */
+        rotacaoDireita(pai);  /* x sobe, pai desce */
+    } else if (avo->dir == pai && pai->dir == x) {
+        /* direita-direita */
+        rotacaoEsquerda(avo); /* pai sobe, avo desce */
+        rotacaoEsquerda(pai); /* x sobe, pai desce */
+    } else {
+        /* direcoes diferentes: isto e um Zig-Zag, nao Zig-Zig.
+           Esta funcao nao trata esse caso. */
+        return;
+    }
+
+    /* se o avo era a raiz global, x agora ocupa esse lugar */
+    if (avoEraRaizGlobal) {
+        *raiz = x;
+    }
+}
+
+/* ---------------------------------------------------------
+ * splayZigZag — caso em que x e o pai estao em direcoes
+ * OPOSTAS em relacao ao avo (esquerda-direita ou direita-esquerda).
+ *
+ * ESQUERDA-DIREITA (pai e filho esquerdo do avo, x e filho
+ * direito do pai):
+ *
+ *      avo                      x
+ *     /                       /   \
+ *    pai        ===>        pai   avo
+ *      \
+ *       x
+ *
+ *   Passos: 1) rotacaoEsquerda(pai) -> x sobe, ocupa o lugar
+ *              do pai, tornando-se filho esquerdo do avo
+ *           2) rotacaoDireita(avo)  -> x sobe de novo, avo e
+ *              o antigo pai ficam como seus dois filhos
+ *   (Diferente do Zig-Zig: aqui rotacionamos o PAI primeiro,
+ *    depois o AVO — e nao o contrario.)
+ *
+ * DIREITA-ESQUERDA (espelho: pai e filho direito do avo, x e
+ * filho esquerdo do pai):
+ *
+ *    avo                        x
+ *      \                      /   \
+ *       pai      ===>       avo   pai
+ *      /
+ *     x
+ *
+ *   Passos: 1) rotacaoDireita(pai)
+ *           2) rotacaoEsquerda(avo)
+ *
+ * Pre-condicao: x->pai (pai) != NULL e x->pai->pai (avo) != NULL,
+ * e x esta em direcao OPOSTA a pai em relacao ao avo. Se a direcao
+ * for igual (zig-zig), esta funcao nao deve ser usada.
+ *
+ * Assim como nos casos anteriores, recebe **raiz porque x pode
+ * acabar virando a raiz global (quando avo era a raiz da arvore).
+ * --------------------------------------------------------- */
+void splayZigZag(No **raiz, No *x) {
+    if (raiz == NULL || x == NULL) {
+        return;
+    }
+
+    No *pai = x->pai;
+    if (pai == NULL) {
+        return; /* x ja e a raiz */
+    }
+
+    No *avo = pai->pai;
+    if (avo == NULL) {
+        return; /* nao ha avo: isto seria um caso Zig, nao Zig-Zag */
+    }
+
+    int avoEraRaizGlobal = (avo->pai == NULL);
+
+    if (avo->esq == pai && pai->dir == x) {
+        /* esquerda-direita */
+        rotacaoEsquerda(pai); /* x sobe, ocupa o lugar do pai */
+        rotacaoDireita(avo);  /* x sobe de novo, acima do avo */
+    } else if (avo->dir == pai && pai->esq == x) {
+        /* direita-esquerda */
+        rotacaoDireita(pai);  /* x sobe, ocupa o lugar do pai */
+        rotacaoEsquerda(avo); /* x sobe de novo, acima do avo */
+    } else {
+        /* mesma direcao: isto e um Zig-Zig, nao Zig-Zag.
+           Esta funcao nao trata esse caso. */
+        return;
+    }
+
+    /* se o avo era a raiz global, x agora ocupa esse lugar */
+    if (avoEraRaizGlobal) {
+        *raiz = x;
+    }
+}
+
+/* ---------------------------------------------------------
+ * splay — algoritmo Splay completo
+ *
+ * Sobe x recursivamente (via while) até que se torne a raiz da
+ * arvore, aplicando a cada iteracao o caso adequado:
+ *
+ *   - SEM avo (x->pai->pai == NULL)        -> Zig
+ *   - COM avo, mesma direcao de x e do pai   -> Zig-Zig
+ *   - COM avo, direcoes opostas               -> Zig-Zag
+ *
+ * Observacao de nomenclatura: o campo que aponta para o pai de
+ * um no, na nossa struct, se chama "raiz" (definido na Etapa 2),
+ * nao "pai". Entao "x->pai == NULL" equivale a "x->pai == NULL"
+ * do pseudocodigo do enunciado: significa que x ja e a raiz
+ * GLOBAL da arvore (nao tem mais pai).
+ * --------------------------------------------------------- */
+void splay(No **raiz, No *x) {
+    if (raiz == NULL || x == NULL) {
+        return;
+    }
+
+    while (x->pai != NULL) {
+        No *pai = x->pai;
+        No *avo = pai->pai;
+
+        if (avo == NULL) {
+            /* Zig: x e filho direto da raiz */
+            splayZig(raiz, x);
+        } else if ((avo->esq == pai && pai->esq == x) ||
+                   (avo->dir == pai && pai->dir == x)) {
+            /* Zig-Zig: x e o pai estao na mesma direcao */
+            splayZigZig(raiz, x);
+        } else {
+            /* Zig-Zag: x e o pai estao em direcoes opostas */
+            splayZigZag(raiz, x);
+        }
+    }
+
+    /* ao final do laco, x->pai == NULL, ou seja, x e a raiz */
+    *raiz = x;
+}
+
+/* ---------------------------------------------------------
+ * buscarSplay — busca com splay
+ *
+ * 1) Localiza o no com a chave procurada (igual a buscar()).
+ * 2) Executa splay() sobre o no encontrado, trazendo-o para
+ *    a raiz da arvore.
+ *
+ * Decisao de design: se a chave NAO existir na arvore, fazemos
+ * splay do ULTIMO no visitado durante a busca (o no onde a busca
+ * parou, que seria o pai do lugar em que a chave entraria caso
+ * fosse inserida). Essa e a pratica usual em Splay Trees: mantem
+ * a propriedade de localidade temporal mesmo em buscas que falham
+ * — uma chave "vizinha" da procurada sobe ao topo, o que e
+ * especialmente util quando esta arvore for usada como cache de
+ * paginas (Etapa futura).
+ *
+ * Retorna o no encontrado (com a chave correta), ou NULL se a
+ * arvore estiver vazia ou a chave nao existir (mas, neste ultimo
+ * caso, o splay do ultimo no visitado ainda assim acontece).
+ * --------------------------------------------------------- */
+No *buscarSplay(No **raiz, int id) {
+    if (raiz == NULL || *raiz == NULL) {
+        return NULL;
+    }
+
+    clock_t inicio = clock();
+
+    stats.buscas++;
+
+    No *atual = *raiz;
+    No *ultimoVisitado = atual;
+
+    while (atual != NULL && atual->pagina.id != id) {
+        ultimoVisitado = atual;
+        if (id < atual->pagina.id) {
+            atual = atual->esq;
+        } else {
+            atual = atual->dir;
+        }
+    }
+
+    No *resultado;
+    if (atual != NULL) {
+        /* chave encontrada: splay no proprio no */
+        stats.hits++;
+        splay(raiz, atual);
+        resultado = atual;
+    } else {
+        /* chave nao encontrada: splay no ultimo no visitado */
+        stats.misses++;
+        splay(raiz, ultimoVisitado);
+        resultado = NULL;
+    }
+
+    clock_t fim = clock();
+    tempoTotalAcesso += (double) (fim - inicio) / CLOCKS_PER_SEC;
+
+    return resultado;
+}
+
+/* ---------------------------------------------------------
+ * inserirSplay — insercao com splay
+ *
+ * 1) Insere a chave normalmente (igual a inserir()), mas de
+ *    forma ITERATIVA — assim ja guardamos o ponteiro exato do
+ *    no recem-criado, sem precisar buscar de novo depois.
+ * 2) Executa splay() sobre esse no, trazendo-o para a raiz.
+ *
+ * Decisao de design: se a chave JA EXISTIR na arvore (nao havera
+ * insercao de duplicado, igual ao comportamento de inserir()),
+ * ainda assim fazemos splay no no existente com aquela chave.
+ * Isso mantem o comportamento consistente: toda operacao que
+ * "toca" em uma chave (ache ela ja la ou crie ela agora) traz
+ * aquele no para o topo.
+ *
+ * Retorna o no que ficou na raiz (o recem-inserido, ou o
+ * preexistente, em caso de chave duplicada).
+ * --------------------------------------------------------- */
+No *inserirSplay(No **raiz, int id, const char *dados) {
+    if (raiz == NULL) {
+        return NULL;
+    }
+
+    if (*raiz == NULL) {
+        /* arvore vazia: o novo no nasce direto como raiz */
+        *raiz = criarNo(id, dados);
+        return *raiz;
+    }
+
+    No *atual = *raiz;
+    No *pai = NULL;
+
+    while (atual != NULL && atual->pagina.id != id) {
+        pai = atual;
+        if (id < atual->pagina.id) {
+            atual = atual->esq;
+        } else {
+            atual = atual->dir;
+        }
+    }
+
+    if (atual != NULL) {
+        /* chave ja existia: nao insere duplicado, so faz splay nela */
+        splay(raiz, atual);
+        return atual;
+    }
+
+    /* chave nao existia: cria o novo no e o conecta ao pai */
+    No *novo = criarNo(id, dados);
+    novo->pai = pai;
+    if (id < pai->pagina.id) {
+        pai->esq = novo;
+    } else {
+        pai->dir = novo;
+    }
+
+    splay(raiz, novo);
+    return novo;
+}
+
+/* ---------------------------------------------------------
+ * maximo — encontra o no com a MAIOR chave de uma subarvore
+ * (o no mais a direita). Usado por removerSplay para unir
+ * as subarvores esquerda e direita apos remover a raiz.
+ * --------------------------------------------------------- */
+No *maximo(No *no) {
+    if (no == NULL) {
+        return NULL;
+    }
+    while (no->dir != NULL) {
+        no = no->dir;
+    }
+    return no;
+}
+
+/* ---------------------------------------------------------
+ * removerSplay — remocao com splay
+ *
+ * Passos (algoritmo classico de remocao em Splay Tree):
+ *   1) Fazer splay da chave a remover -> ela vira a raiz.
+ *      (usamos buscarSplay; se a chave nao existir, a busca
+ *      ainda faz splay do ultimo no visitado, mas detectamos
+ *      que a chave nao foi encontrada e nao removemos nada)
+ *   2) Separar as subarvores esquerda (E) e direita (D) da raiz,
+ *      e liberar a memoria da raiz antiga.
+ *   3) Unir E e D:
+ *        - se E for NULL, a nova raiz e D
+ *        - se D for NULL, a nova raiz e E
+ *        - senao: fazer splay do MAIOR elemento de E (o no mais
+ *          a direita de E). Como esse elemento e o maior de E,
+ *          depois do splay ele fica sem filho direito — entao
+ *          basta encaixar D ali, como seu novo filho direito.
+ *          Isso preserva a propriedade da BST, pois todo elemento
+ *          de E e menor que todo elemento de D.
+ *
+ * Retorna 1 se a chave foi encontrada e removida, ou 0 se a
+ * chave nao existia na arvore (nada e removido nesse caso, mas
+ * a arvore ainda sofre o splay do ultimo no visitado).
+ * --------------------------------------------------------- */
+int removerSplay(No **raiz, int id) {
+    if (raiz == NULL || *raiz == NULL) {
+        return 0;
+    }
+
+    No *encontrado = buscarSplay(raiz, id);
+    if (encontrado == NULL) {
+        /* chave nao existe; buscarSplay ja fez splay do ultimo
+           no visitado, nada mais a fazer aqui */
+        return 0;
+    }
+
+    /* apos o splay, a chave removida e a raiz da arvore */
+    No *raizAntiga = *raiz;
+    No *E = raizAntiga->esq;
+    No *D = raizAntiga->dir;
+
+    if (E != NULL) {
+        E->pai = NULL; /* E passa a ser uma arvore independente */
+    }
+    if (D != NULL) {
+        D->pai = NULL; /* D passa a ser uma arvore independente */
+    }
+
+    free(raizAntiga);
+
+    if (E == NULL) {
+        *raiz = D;
+    } else if (D == NULL) {
+        *raiz = E;
+    } else {
+        /* caso geral: splay do maior elemento de E, depois
+           encaixa D como filho direito desse novo topo */
+        No *maiorDeE = maximo(E);
+        splay(&E, maiorDeE);  /* E agora tem maiorDeE como raiz,
+                                  e maiorDeE->dir == NULL */
+        E->dir = D;
+        D->pai = E;
+        *raiz = E;
+    }
+
+    if (*raiz != NULL) {
+        (*raiz)->pai = NULL; /* a nova raiz global nao tem pai */
+    }
+
+    return 1;
+}
+
+/* ---------------------------------------------------------
+ * somaProfundidades — soma a profundidade de cada no da
+ * subarvore (raiz tem profundidade 0). "qtdNos" acumula
+ * quantos nos foram visitados, para depois calcular a media.
+ * Funcao auxiliar de profundidadeMedia().
+ * --------------------------------------------------------- */
+void somaProfundidades(No *no, int profundidadeAtual, long *somaAcumulada, long *qtdNos) {
+    if (no == NULL) {
+        return;
+    }
+    *somaAcumulada += profundidadeAtual;
+    *qtdNos += 1;
+    somaProfundidades(no->esq, profundidadeAtual + 1, somaAcumulada, qtdNos);
+    somaProfundidades(no->dir, profundidadeAtual + 1, somaAcumulada, qtdNos);
+}
+
+/* ---------------------------------------------------------
+ * profundidadeMedia — calcula a profundidade media dos nos
+ * da arvore (raiz = profundidade 0). Retorna 0.0 para arvore
+ * vazia.
+ * --------------------------------------------------------- */
+double profundidadeMedia(No *raiz) {
+    if (raiz == NULL) {
+        return 0.0;
+    }
+    long soma = 0;
+    long qtd = 0;
+    somaProfundidades(raiz, 0, &soma, &qtd);
+    return (double) soma / (double) qtd;
+}
+
+/* ---------------------------------------------------------
+ * imprimirEstatisticas — exibe um relatorio com as metricas
+ * coletadas em "stats" e o tempo total/medio de acesso.
+ * Recebe a raiz atual para tambem reportar a profundidade media.
+ * --------------------------------------------------------- */
+void imprimirEstatisticas(No *raiz) {
+    printf("----- Estatisticas de desempenho -----\n");
+    printf("  Buscas realizadas : %ld\n", stats.buscas);
+    printf("  Hits              : %ld\n", stats.hits);
+    printf("  Misses            : %ld\n", stats.misses);
+    printf("  Rotacoes          : %ld\n", stats.rotacoes);
+    printf("  Profundidade media: %.3f\n", profundidadeMedia(raiz));
+    printf("  Tempo total acesso: %.6f s\n", tempoTotalAcesso);
+    if (stats.buscas > 0) {
+        printf("  Tempo medio/busca : %.9f s\n", tempoTotalAcesso / (double) stats.buscas);
+    }
+    printf("---------------------------------------\n");
+}
+
+/* ---------------------------------------------------------
+ * CacheSplay — encapsula a arvore Splay como um cache de
+ * paginas com capacidade limitada.
+ *
+ * Quando o cache esta cheio e uma pagina nova precisa entrar,
+ * e necessario liberar espaco removendo alguma pagina existente
+ * (politica de despejo / eviction). A escolha natural, dado que
+ * estamos usando uma Splay Tree, e remover a pagina MENOS
+ * RECENTEMENTE USADA. Toda vez que uma pagina e acessada (busca
+ * ou insercao), ela sobe para a raiz via splay — entao, com o
+ * tempo, paginas raramente usadas tendem a ficar mais distantes
+ * da raiz. Usamos isso como aproximacao de "menos recentemente
+ * usada": removemos o NO MAIS PROFUNDO da arvore (o mais distante
+ * da raiz). Nao e uma LRU exata (a Splay Tree nao guarda um
+ * timestamp por no), mas e a politica que aproveita diretamente
+ * a propriedade de localidade temporal da estrutura, sem precisar
+ * de nenhuma lista ou campo extra.
+ * --------------------------------------------------------- */
+typedef struct {
+    No *raiz;
+    int capacidade;
+    int tamanho;
+} CacheSplay;
+
+/* ---------------------------------------------------------
+ * criarCache — inicializa um CacheSplay vazio com a capacidade
+ * dada (deve ser >= 1).
+ * --------------------------------------------------------- */
+CacheSplay *criarCache(int capacidade) {
+    if (capacidade < 1) {
+        fprintf(stderr, "Erro: capacidade do cache deve ser >= 1.\n");
+        exit(EXIT_FAILURE);
+    }
+    CacheSplay *cache = (CacheSplay *) malloc(sizeof(CacheSplay));
+    if (cache == NULL) {
+        fprintf(stderr, "Erro: falha ao alocar memoria para o cache.\n");
+        exit(EXIT_FAILURE);
+    }
+    cache->raiz = NULL;
+    cache->capacidade = capacidade;
+    cache->tamanho = 0;
+    return cache;
+}
+
+/* ---------------------------------------------------------
+ * noMaisProfundo — encontra o no de MAIOR profundidade na
+ * arvore (o mais distante da raiz). Em caso de empate entre
+ * varios nos na mesma profundidade maxima, retorna o primeiro
+ * encontrado pelo percurso (esquerda antes de direita).
+ * Usado pela politica de despejo do cache.
+ * --------------------------------------------------------- */
+void buscarMaisProfundoRec(No *no, int profundidadeAtual,
+                            No **melhorNo, int *melhorProfundidade) {
+    if (no == NULL) {
+        return;
+    }
+    if (profundidadeAtual > *melhorProfundidade) {
+        *melhorProfundidade = profundidadeAtual;
+        *melhorNo = no;
+    }
+    buscarMaisProfundoRec(no->esq, profundidadeAtual + 1, melhorNo, melhorProfundidade);
+    buscarMaisProfundoRec(no->dir, profundidadeAtual + 1, melhorNo, melhorProfundidade);
+}
+
+No *noMaisProfundo(No *raiz) {
+    if (raiz == NULL) {
+        return NULL;
+    }
+    No *melhorNo = raiz;
+    int melhorProfundidade = 0;
+    buscarMaisProfundoRec(raiz, 0, &melhorNo, &melhorProfundidade);
+    return melhorNo;
+}
+
+/* ---------------------------------------------------------
+ * despejarPagina — remove do cache a pagina menos recentemente
+ * usada (o no mais profundo da arvore), liberando espaco para
+ * uma nova insercao. Pressupoe que o cache nao esta vazio.
+ * --------------------------------------------------------- */
+void despejarPagina(CacheSplay *cache) {
+    if (cache == NULL || cache->raiz == NULL) {
+        return;
+    }
+    No *vitima = noMaisProfundo(cache->raiz);
+    removerSplay(&cache->raiz, vitima->pagina.id);
+    cache->tamanho--;
+}
+
+/* ---------------------------------------------------------
+ * buscarPagina — busca uma pagina no cache pelo id.
+ *
+ * Internamente usa buscarSplay, que ja traz a pagina encontrada
+ * (ou o ultimo no visitado, em caso de miss) para a raiz —
+ * preservando a localidade temporal do cache a cada acesso.
+ *
+ * Retorna o ponteiro para o No encontrado (cujo campo pagina
+ * pode ser lido pelo chamador), ou NULL se a pagina nao estiver
+ * no cache (cache miss).
+ * --------------------------------------------------------- */
+No *buscarPagina(CacheSplay *cache, int id) {
+    if (cache == NULL) {
+        return NULL;
+    }
+    return buscarSplay(&cache->raiz, id);
+}
+
+/* ---------------------------------------------------------
+ * inserirPagina — insere uma nova pagina no cache.
+ *
+ * Se a pagina (mesmo id) ja existir, apenas atualiza seus dados
+ * e faz splay nela (equivale a um "acesso" aquela pagina).
+ *
+ * Se o cache estiver cheio (tamanho == capacidade) e o id for
+ * novo, despeja a pagina menos recentemente usada antes de
+ * inserir a nova, mantendo o tamanho dentro da capacidade.
+ * --------------------------------------------------------- */
+void inserirPagina(CacheSplay *cache, int id, const char *dados) {
+    if (cache == NULL) {
+        return;
+    }
+
+    No *existente = buscar(cache->raiz, id);
+    if (existente != NULL) {
+        /* pagina ja esta no cache: apenas atualiza os dados e
+           faz splay (contabilizando como acesso) */
+        if (dados != NULL) {
+            snprintf(existente->pagina.dados, sizeof(existente->pagina.dados), "%s", dados);
+        }
+        splay(&cache->raiz, existente);
+        return;
+    }
+
+    if (cache->tamanho >= cache->capacidade) {
+        despejarPagina(cache);
+    }
+
+    inserirSplay(&cache->raiz, id, dados);
+    cache->tamanho++;
+}
+
+/* ---------------------------------------------------------
+ * removerPagina — remove uma pagina do cache pelo id, se ela
+ * existir. Retorna 1 se removeu, 0 se a pagina nao estava no
+ * cache.
+ * --------------------------------------------------------- */
+int removerPagina(CacheSplay *cache, int id) {
+    if (cache == NULL) {
+        return 0;
+    }
+    int removido = removerSplay(&cache->raiz, id);
+    if (removido) {
+        cache->tamanho--;
+    }
+    return removido;
+}
+
+/* ---------------------------------------------------------
+ * liberarCache — libera toda a memoria do cache (arvore +
+ * estrutura do cache em si).
+ * --------------------------------------------------------- */
+void liberarCache(CacheSplay *cache) {
+    if (cache == NULL) {
+        return;
+    }
+    liberarArvore(cache->raiz);
+    free(cache);
+}
+
+/* ---------------------------------------------------------
+ * Percurso em ordem (in-order)
+ * --------------------------------------------------------- */
+void emOrdem(No *no) {
+    if (no == NULL) {
+        return;
+    }
+    emOrdem(no->esq);
+    printf("%d ", no->pagina.id);
+    emOrdem(no->dir);
+}
+
+/* ---------------------------------------------------------
+ * Testes
+ * --------------------------------------------------------- */
+int main(void) {
+    /* ============================================================
+     * TESTE 1 — Operacoes basicas: criar, inserir, buscar, remover
+     * ============================================================ */
+    printf("=== TESTE 1: operacoes basicas do CacheSplay ===\n");
+
+    CacheSplay *cache1 = criarCache(5);
+
+    inserirPagina(cache1, 10, "dados da pagina 10");
+    inserirPagina(cache1, 20, "dados da pagina 20");
+    inserirPagina(cache1, 30, "dados da pagina 30");
+
+    printf("Cache (em ordem por id): ");
+    emOrdem(cache1->raiz);
+    printf("  | tamanho=%d capacidade=%d\n\n", cache1->tamanho, cache1->capacidade);
+
+    No *encontrado1 = buscarPagina(cache1, 20);
+
+    printf("Verificacoes:\n");
+    printf("  tamanho == 3?                    %s (valor=%d)\n",
+           (cache1->tamanho == 3) ? "OK" : "FALHOU", cache1->tamanho);
+    printf("  buscarPagina(20) encontrou?       %s\n",
+           (encontrado1 != NULL) ? "OK" : "FALHOU");
+    printf("  dados de 20 corretos?             %s (valor=\"%s\")\n",
+           (encontrado1 != NULL && strcmp(encontrado1->pagina.dados, "dados da pagina 20") == 0) ? "OK" : "FALHOU",
+           encontrado1 != NULL ? encontrado1->pagina.dados : "");
+    printf("  20 e a raiz apos a busca (splay)? %s (id=%d)\n",
+           (cache1->raiz->pagina.id == 20) ? "OK" : "FALHOU", cache1->raiz->pagina.id);
+    printf("  buscarPagina(999) retorna NULL?   %s\n",
+           (buscarPagina(cache1, 999) == NULL) ? "OK" : "FALHOU");
+
+    int removeu = removerPagina(cache1, 10);
+    printf("  removerPagina(10) retornou 1?     %s\n",
+           (removeu == 1) ? "OK" : "FALHOU");
+    printf("  tamanho == 2 apos remover?        %s (valor=%d)\n",
+           (cache1->tamanho == 2) ? "OK" : "FALHOU", cache1->tamanho);
+    printf("  buscarPagina(10) agora e NULL?    %s\n",
+           (buscarPagina(cache1, 10) == NULL) ? "OK" : "FALHOU");
+
+    liberarCache(cache1);
+
+    /* ============================================================
+     * TESTE 2 — Politica de despejo (eviction) quando o cache
+     * esta cheio: a pagina menos recentemente usada deve ser
+     * removida, NAO a mais antiga por ordem de insercao.
+     *
+     * Cache com capacidade 3.
+     *   1) insere 10, 20, 30           -> cheio (tamanho=3)
+     *   2) acessa (busca) 10            -> 10 sobe ao topo
+     *   3) insere 40                    -> cache cheio, precisa
+     *      despejar. Apos o acesso, a arvore fica:
+     *           10
+     *             \
+     *              20
+     *                \
+     *                 30
+     *      O no mais profundo e 30 (profundidade 2) -> 30 e
+     *      despejado, mesmo sendo o ultimo inserido antes do
+     *      acesso a 10. 10 e 20, que foram tocados mais
+     *      recentemente, permanecem.
+     * ============================================================ */
+    printf("\n=== TESTE 2: politica de despejo (LRU aproximado) ===\n");
+
+    CacheSplay *cache2 = criarCache(3);
+
+    inserirPagina(cache2, 10, "p10");
+    inserirPagina(cache2, 20, "p20");
+    inserirPagina(cache2, 30, "p30");
+
+    printf("Apos inserir 10,20,30 (cheio): ");
+    emOrdem(cache2->raiz);
+    printf(" | tamanho=%d\n", cache2->tamanho);
+
+    /* acessa 10, trazendo-o ao topo (marca como recentemente usado) */
+    buscarPagina(cache2, 10);
+
+    printf("Apos acessar 10 (splay):       ");
+    emOrdem(cache2->raiz);
+    printf(" | raiz=%d\n", cache2->raiz->pagina.id);
+
+    /* cache cheio: inserir 40 deve despejar a pagina menos
+       recentemente usada (esperado: 30) */
+    inserirPagina(cache2, 40, "p40");
+
+    printf("Apos inserir 40 (com despejo): ");
+    emOrdem(cache2->raiz);
+    printf(" | tamanho=%d\n\n", cache2->tamanho);
+
+    printf("Verificacoes:\n");
+    printf("  tamanho continua 3 (nao excedeu capacidade)? %s (valor=%d)\n",
+           (cache2->tamanho == 3) ? "OK" : "FALHOU", cache2->tamanho);
+    printf("  30 foi despejado (nao esta mais no cache)?   %s\n",
+           (buscarPagina(cache2, 30) == NULL) ? "OK" : "FALHOU");
+    printf("  10 ainda esta no cache (foi acessado)?       %s\n",
+           (buscarPagina(cache2, 10) != NULL) ? "OK" : "FALHOU");
+    printf("  20 ainda esta no cache?                      %s\n",
+           (buscarPagina(cache2, 20) != NULL) ? "OK" : "FALHOU");
+    printf("  40 foi inserido com sucesso?                  %s\n",
+           (buscarPagina(cache2, 40) != NULL) ? "OK" : "FALHOU");
+
+    liberarCache(cache2);
+
+    /* ============================================================
+     * TESTE 3 — inserirPagina em uma chave JA existente apenas
+     * atualiza os dados e faz splay, sem alterar o tamanho nem
+     * disparar despejo.
+     * ============================================================ */
+    printf("\n=== TESTE 3: inserirPagina com id ja existente ===\n");
+
+    CacheSplay *cache3 = criarCache(2);
+    inserirPagina(cache3, 1, "versao antiga");
+    inserirPagina(cache3, 2, "outra pagina");
+
+    inserirPagina(cache3, 1, "versao nova"); /* atualiza, nao deve despejar nada */
+
+    No *no1 = buscarPagina(cache3, 1);
+    No *no2 = buscarPagina(cache3, 2);
+
+    printf("Verificacoes:\n");
+    printf("  tamanho continua 2 (sem despejo)?  %s (valor=%d)\n",
+           (cache3->tamanho == 2) ? "OK" : "FALHOU", cache3->tamanho);
+    printf("  dados de 1 foram atualizados?      %s (valor=\"%s\")\n",
+           (no1 != NULL && strcmp(no1->pagina.dados, "versao nova") == 0) ? "OK" : "FALHOU",
+           no1 != NULL ? no1->pagina.dados : "");
+    printf("  pagina 2 ainda presente?           %s\n",
+           (no2 != NULL) ? "OK" : "FALHOU");
+
+    liberarCache(cache3);
+
+    /* ============================================================
+     * TESTE 4 — removerPagina com id inexistente nao afeta o cache
+     * ============================================================ */
+    printf("\n=== TESTE 4: removerPagina com id inexistente ===\n");
+
+    CacheSplay *cache4 = criarCache(3);
+    inserirPagina(cache4, 5, "p5");
+    inserirPagina(cache4, 6, "p6");
+
+    int removeuInexistente = removerPagina(cache4, 999);
+
+    printf("Verificacoes:\n");
+    printf("  removerPagina(999) retornou 0?    %s\n",
+           (removeuInexistente == 0) ? "OK" : "FALHOU");
+    printf("  tamanho continua 2?                %s (valor=%d)\n",
+           (cache4->tamanho == 2) ? "OK" : "FALHOU", cache4->tamanho);
+
+    liberarCache(cache4);
+
+    return 0;
+}
