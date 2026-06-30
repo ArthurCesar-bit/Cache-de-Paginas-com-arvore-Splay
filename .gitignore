@@ -1,0 +1,12 @@
+# Artefatos de build gerados pelo Makefile (regeneráveis com `make`)
+build/
+
+# Objetos e binários soltos
+*.o
+*.out
+
+# Arquivos de dados criados pelos testes/benchmark
+*.dat
+
+# Saídas do benchmark (gráficos)
+*.png

@@ -39,8 +39,15 @@ asan: CFLAGS += $(ASAN)
 asan: clean test
 
 # Teste de concorrência sob ThreadSanitizer (pega data race). Para a E3.
+# Em alguns kernels o runtime do TSan falha com "unexpected memory mapping"
+# por causa do ASLR; 'setarch -R' desliga a aleatorização e contorna isso
+# (não altera a semântica do teste). Cai no modo direto se não houver setarch.
 stress: $(BUILD)/test_concurrency_tsan
-	./$(BUILD)/test_concurrency_tsan
+	@if command -v setarch >/dev/null 2>&1; then \
+		setarch -R ./$(BUILD)/test_concurrency_tsan; \
+	else \
+		./$(BUILD)/test_concurrency_tsan; \
+	fi
 
 $(BUILD)/test_concurrency_tsan: tests/test_concurrency.c $(SRC) | $(BUILD)
 	$(CC) $(CFLAGS) $(TSAN) $^ -o $@ $(LDFLAGS)
