@@ -491,3 +491,92 @@ relatório experimental (E4).
     do comando da atividade?";
   - "siga com o caminho A e mova o bst.c para um arquivo de docs";
   - "crie o gitignore"; "atualize o README.md / DIARIO.md com as decisões".
+
+---
+
+## Dia 2 (continuação) — 30/06/2026 · tarde — Camada de benchmark (E4)
+
+### Implementação da camada de benchmark
+
+Os três arquivos de `bench/` ainda eram **stubs vazios** (0 byte). Implementamos
+a camada de medição que faltava para a E4:
+
+| Arquivo | O que faz |
+|---|---|
+| `bench/workload.h` | contrato do gerador de carga: enum `WL_UNIFORM`/`WL_ZIPFIAN` e a struct `workload_t` (vetores `pages` + `is_write`) |
+| `bench/workload.c` | gera a sequência de acessos: RNG splitmix64 (reprodutível), zipf clássico de Gray/YCSB e embaralhamento FNV-1a das páginas quentes |
+| `bench/bench_main.c` | driver: replaya a carga só pela fachada `pc_*`, mede hit ratio / profundidade / vazão, escreve os CSVs |
+| `bench/gen_plots.py` | lê os CSVs e gera os PNGs do relatório (matplotlib, backend `Agg`) |
+
+`Makefile`: novos alvos `bench` (compila + roda, gera os CSVs) e `plots` (CSVs →
+PNG). A regra usa `-Ibench` além de `-Iinclude` porque `bench/` tem header
+próprio (`workload.h`).
+
+### Decisões de projeto do benchmark
+
+- **Carga pré-computada.** Geramos todo o vetor de acessos **antes** de medir,
+  para manter o custo do RNG/zipf **fora** do cronômetro — o laço cronometrado
+  só lê o vetor e chama `pc_read`/`pc_write`.
+- **Embaralhar as páginas quentes (FNV-1a).** O gerador zipf produz "ranks de
+  popularidade" (0 = mais quente). Sem tratar, as quentes seriam sempre os
+  `pageno` baixos e **cairiam todas no mesmo shard**, falseando a escalabilidade.
+  Mapear `rank → fnv1a(rank) % npages` espalha as quentes por todos os shards.
+- **Medir só pela fachada pública.** O driver usa apenas `pc_*`; não espia o
+  interior do cache. Métricas: `pc_hit_ratio`, `pc_avg_depth` e tempo de parede
+  (`clock_gettime(CLOCK_MONOTONIC)`).
+- **Dois experimentos:** (1) comparativo de 1 thread `{splay,lru} × {uniform,
+  zipfian}`; (2) escalabilidade da carga zipfiana com 1/2/4/8/16 threads
+  (`nshards = nthreads`). Parâmetros configuráveis por flags (`--theta`,
+  `--capacity`, `--nops`, …) com default modesto (roda em segundos).
+
+### Resultado observado (a discutir no relatório)
+
+Com o default (`npages=20000`, `capacity=2000`, `nops=500000`, `theta=0.99`):
+
+- **Uniforme:** hit ratio ~10% nas duas políticas (= `capacidade/npages`), como
+  esperado sem localidade.
+- **Zipfiana:** hit ratio sobe para ~70% — a localidade aparece.
+- **Surpresa honesta:** nesta configuração o **LRU saiu mais rápido e com hit
+  ratio ligeiramente maior** que a splay. Não é bug — é justamente a pergunta que
+  o tema manda investigar. A splay paga rotações (muta a árvore a cada acesso) e,
+  sob zipf "puro", o LRU já captura bem a localidade. Fica como ponto a explorar
+  no relatório: variar `theta`/`capacity` e testar um *working set* que muda em
+  fases, onde a propriedade de working set da splay tende a ajudar.
+
+### Bugs e percalços
+
+- **`matplotlib` ausente:** o `gen_plots.py` falhou de forma limpa avisando a
+  falta. A primeira tentativa de instalar foi bloqueada pelo PEP 668
+  (ambiente "externally managed"); resolvido com
+  `pip install --user --break-system-packages matplotlib`. O script já usa o
+  backend `Agg` para rodar sem display.
+- Fora isso, compilou de primeira **sem warnings** (`-Wall -Wextra -Werror`) e os
+  6 testes seguem passando após `make clean && make test`.
+
+### Pendência de infra: `.vscode/`
+
+O editor (extensão **C/C++ Runner**) gerou uma pasta `.vscode/` com `launch.json`
+contendo **caminhos absolutos** da máquina (`/home/arthur/...`) e apontando para
+um build genérico que **não** é o do nosso `Makefile`. Decisão tomada: tratá-la
+como config local (candidata a entrar no `.gitignore`), **não** versioná-la como
+está. Ainda não aplicado ao `.gitignore`.
+
+### Uso de IA
+
+- **Ferramenta:** Claude Code (assistente de IA).
+- **Para que serviu:** implementar `bench/` (gerador de carga + driver + script
+  de gráficos), adicionar os alvos `make bench`/`make plots`, atualizar
+  `README.md` e `DICIONARIO.md`, e explicar conceitos de C/SO sob demanda
+  (`uint64_t`/`size_t`, sufixo `_t`, `_POSIX_C_SOURCE`, o que é POSIX) com vistas
+  à defesa oral.
+- **O que precisou de decisão/correção da equipe:**
+  - Validamos que o benchmark usa **só a fachada `pc_*`** (sem espiar o interior),
+    para o número ser honesto.
+  - Conferimos que o embaralhamento FNV das páginas quentes era necessário para a
+    escalabilidade não ficar enviesada por shard.
+  - A equipe decidiu **não** versionar `.vscode/` (caminhos absolutos da máquina).
+- **Prompts usados (resumo):**
+  - "aplique os códigos da pasta bench, para o sistema rodar";
+  - "explique o que cada código de bench/ faz";
+  - "o que é uint64_t / size_t / o sufixo _t / _POSIX_C_SOURCE / POSIX?";
+  - "atualize o README.md, o DICIONARIO.md e o DIARIO.md".

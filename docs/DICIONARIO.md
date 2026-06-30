@@ -114,6 +114,25 @@ Tendência de reacessar em breve o que foi acessado agora. É a aposta que faz a
 splay (e o LRU) funcionarem. Cargas **zipfianas** têm localidade forte;
 **uniformes** não têm.
 
+**Distribuição zipfiana × uniforme (cargas do benchmark)**
+- **Zipfiana**: poucas páginas "quentes" concentram a maioria dos acessos (lei de
+  potência, controlada pelo expoente `theta` ≈ 0.99) → localidade forte.
+- **Uniforme**: toda página é igualmente provável → sem localidade. O hit ratio
+  fica perto de `capacidade / nº de páginas`.
+➜ no projeto: `WL_ZIPFIAN` / `WL_UNIFORM` em `bench/workload.c` (gerador clássico
+de Gray/YCSB; as páginas quentes são **embaralhadas por um hash FNV-1a** para se
+espalharem pelos shards e não ficarem grudadas nos `pageno` baixos).
+
+**Vazão (throughput / ops por segundo)**
+Quantos acessos por segundo o cache atende (`nops / tempo`). É a métrica do
+experimento de escalabilidade: cresce ao aumentar threads/shards.
+➜ no projeto: `ops_per_sec` em `bench/bench_main.c`.
+
+**Carga pré-computada**
+Gerar toda a sequência de acessos **antes** de medir, para que o custo do RNG/zipf
+não entre no cronômetro — o laço de medição só lê o vetor e chama `pc_read`/`pc_write`.
+➜ no projeto: `workload_t` (vetores `pages`/`is_write`) em `bench/workload.h`.
+
 **LRU (Least Recently Used)**
 Política clássica de despejo: sai quem ficou mais tempo sem ser usado.
 Implementada com **tabela hash** (achar em O(1)) + **lista duplamente encadeada**
@@ -242,10 +261,10 @@ minicache/
 ├── include/   contratos (.h): o QUE cada módulo oferece
 ├── src/       implementações (.c): o COMO — é o coração do projeto
 ├── tests/     bateria de testes (cada um com seu main())
-├── bench/     programa-cliente que mede splay×LRU (a implementar)
+├── bench/     programa-cliente que mede splay×LRU + gerador de carga
 ├── docs/      protótipo de referência (não entra no build)
 ├── build/     artefatos gerados pelo make (fora do Git)
-├── Makefile   regras de compilação (all/test/asan/stress/clean)
+├── Makefile   regras de compilação (all/test/asan/stress/bench/plots/clean)
 ├── README.md  visão geral, arquitetura e entregas
 ├── DIARIO.md  registro semanal (decisões, bugs, uso de IA)
 └── DICIONARIO.md  este arquivo
@@ -274,14 +293,17 @@ Seis programas independentes, asserts puros (sem framework), cada um com seu
 `main()`. Rodados por `make test`. Cobrem: splay, disco, stats, lru, cache
 (roundtrip + write-back) e concorrência (8 threads, alvo do TSan).
 
-### `bench/` — o programa-cliente (pendente)
+### `bench/` — o programa-cliente (implementado)
 
-Vai conter o **`int main()` da aplicação**:
-- `workload.c` — gera as cargas (zipfiana = com localidade; uniforme = sem);
-- `bench_main.c` — roda a carga em splay e LRU, mede hit ratio / profundidade /
-  I/O / vazão por nº de threads;
-- `gen_plots.py` — transforma a saída em gráficos do relatório.
-Hoje os três estão **vazios** (stubs) e não há alvo `make bench`.
+Contém o **`int main()` da aplicação** e o gerador de carga:
+- `workload.h` / `workload.c` — geram as cargas **pré-computadas** (zipfiana =
+  com localidade; uniforme = sem). Pré-computar mantém o custo do RNG **fora** do
+  cronômetro: o benchmark só replaya o vetor de acessos.
+- `bench_main.c` — roda a carga em splay e LRU usando só a fachada `pc_*` e mede
+  hit ratio / profundidade / vazão; faz dois experimentos (comparativo de 1
+  thread e escalabilidade com 1/2/4/8/16 threads) e escreve os CSVs em `build/`.
+- `gen_plots.py` — transforma os CSVs em gráficos PNG do relatório (matplotlib).
+Alvos: `make bench` (roda e gera os CSVs) e `make plots` (CSVs → PNG).
 
 ### `docs/` — referência
 

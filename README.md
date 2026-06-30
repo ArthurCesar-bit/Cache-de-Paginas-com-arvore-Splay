@@ -79,7 +79,7 @@ O que impede uma solução trivial e orienta a avaliação experimental:
 | Linguagem | **C (C11)**, `gcc -Wall -Wextra -Werror`, **sem warnings** |
 | Concorrência | **sem data races** (TSan) · **sem vazamentos** (Valgrind/ASan) |
 | Locking | **mutex global** só é aceito **até a Entrega 2** |
-| Build | `Makefile` com alvos `all`, `test`, `stress`, `clean` |
+| Build | `Makefile` com alvos `all`, `test`, `stress`, `bench`, `plots`, `clean` |
 | Testes | bateria própria + scripts de geração dos gráficos |
 | Rastreabilidade | `DIARIO.md` semanal + commits **incrementais** (nada de "initial commit" gigante) |
 | Relatório | PDF de **8–15 páginas** com gráficos de dados reais |
@@ -137,7 +137,7 @@ minicache/
 ├── .gitignore        # ignora build/, *.o, *.dat, *.png (artefatos regeneráveis)
 ├── include/   # page_cache, splay, lru, disk, stats (+ cache_policy vazio)
 ├── src/       # implementações: disk, splay, lru, stats, page_cache  ✅
-├── bench/      # gen_plots.py + bench_main.c, workload.c (stubs, a implementar)
+├── bench/      # bench_main.c + workload.{c,h} (gerador de carga) + gen_plots.py
 ├── tests/     # test_splay, test_disk, test_stats, test_lru, test_cache, test_concurrency
 ├── docs/      # prototipo-splay.c — protótipo monolítico de referência (etapas 1–15)
 └── build/      # gerado pelo Makefile (binários + .dat dos testes); fora do Git
@@ -154,8 +154,18 @@ make            # compila a bateria de testes (sem warnings)
 make test       # compila e roda os testes unitários
 make asan       # mesma bateria sob AddressSanitizer + UBSan (vazamento/UB)
 make stress     # teste multithread sob ThreadSanitizer (data race)
+make bench      # compila e roda o benchmark (gera os CSVs em build/)
+make plots      # roda o benchmark e gera os gráficos PNG (precisa de matplotlib)
 make clean      # limpa build/
 ```
+
+> **Benchmark (E4):** `make bench` roda dois experimentos sobre a fachada pública
+> `pc_*` e escreve `build/bench_compare.csv` (splay × LRU sob carga uniforme e
+> zipfiana, 1 thread) e `build/bench_threads.csv` (vazão da carga zipfiana com
+> 1/2/4/8/16 threads e shards). Parâmetros têm default modesto e podem ser
+> ajustados por flags: `./build/bench --theta 0.99 --capacity 2000 --nops 500000`
+> (ver `--help`). `make plots` ainda converte os CSVs em PNG via
+> `bench/gen_plots.py`.
 
 > **TSan e ASLR:** em alguns kernels o runtime do ThreadSanitizer aborta com
 > `unexpected memory mapping` por causa da aleatorização de memória. O alvo
@@ -175,9 +185,10 @@ make clean      # limpa build/
 **Estado atual:** os 5 módulos de `src/` (disk, splay, lru, stats, page_cache)
 estão implementados, com a bateria de 6 testes passando em `make test`, `make
 asan` e `make stress` (zero warnings, sem vazamento, sem data race). Já há pool
-de frames, *write-back* e sharding (esqueleto de E3). **Falta** a camada de
-benchmark (`bench/bench_main.c` + `bench/workload.c` ainda são *stubs*) e o
-relatório experimental (E4).
+de frames, *write-back* e sharding (esqueleto de E3). A **camada de benchmark**
+(`bench/bench_main.c` + `bench/workload.{c,h}` + `bench/gen_plots.py`) está
+implementada e gera os CSVs/gráficos do comparativo via `make bench` / `make
+plots`. **Falta** apenas o relatório experimental em PDF (E4).
 
 ## 10. Métricas coletadas (para o relatório)
 
