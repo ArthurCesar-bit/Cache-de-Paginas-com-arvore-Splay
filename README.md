@@ -90,13 +90,32 @@ feliz `−10%` · race no TSan `−15%`.
 
 ## 6. Arquitetura
 
-A aplicação fala com uma fachada estilo *syscall* (`pc_read`, `pc_write`,
-`pc_flush`). A fachada coordena duas peças desacopladas: a **política/índice**
-(splay **ou** LRU, atrás de uma mesma vtable) e o **pool de frames** (bytes +
+A aplicação fala com uma fachada estilo *syscall* (`pc_open`, `pc_close`,
+`pc_read`, `pc_write`, `pc_flush`). A fachada coordena duas peças desacopladas:
+a **política/índice** (splay **ou** LRU) e o **pool de frames** (bytes +
 *dirty bits*). Só o pool de frames conversa com a **camada de disco**
-(arquivo de blocos + `fsync`).
+(arquivo de blocos endereçados por `pageno`).
 
-A interface de política é o que permite trocar splay por LRU sem mexer no resto:
+**Decisões de implementação (estado atual):**
+
+- **Despacho de política por `enum`, não por vtable.** A troca splay↔LRU é feita
+  dentro do `page_cache` por uma camada fina (`pol_lookup`/`pol_insert`/
+  `pol_evict`) que despacha conforme `pc_policy_t` (`PC_POLICY_SPLAY` /
+  `PC_POLICY_LRU`). É mais simples que a vtable e basta para o comparativo. A
+  vtable `cache_policy_t` abaixo continua sendo o desenho-alvo (refinamento
+  opcional); por isso `include/cache_policy.h` está **vazio** por enquanto e
+  **não** é usado por nenhum módulo.
+- **Despejo simétrico nas duas políticas.** Tanto a splay (`splay_evict_victim`,
+  a folha mais profunda) quanto o LRU (`lru_evict_victim`, a cauda) expõem a
+  vítima + seu frame; o `page_cache` faz o *write-back* se a página estiver suja
+  e reaproveita o frame.
+- **Disco com I/O posicionado.** `disk` usa `pread`/`pwrite` (não `fseek`+`fread`)
+  para ser seguro entre threads sem lock global; os contadores de I/O são
+  **atômicos** (`stdatomic`). O *write-back* acontece no despejo, no `pc_flush`
+  e no `pc_close`.
+
+A vtable abaixo é o desenho-alvo da interface de política (ainda **não**
+implementada — ver `include/cache_policy.h`):
 
 ```c
 typedef struct cache_policy {
@@ -115,20 +134,34 @@ typedef struct cache_policy {
 minicache/
 ├── Makefile
 ├── DIARIO.md
-├── include/   # page_cache, cache_policy, splay, lru, disk, stats
-├── src/       # implementações
-├── bench/      # workload (zipfiano/uniforme), bench_main, gen_plots
-└── tests/     # test_splay, test_lru, test_cache, test_concurrency
+├── .gitignore        # ignora build/, *.o, *.dat, *.png (artefatos regeneráveis)
+├── include/   # page_cache, splay, lru, disk, stats (+ cache_policy vazio)
+├── src/       # implementações: disk, splay, lru, stats, page_cache  ✅
+├── bench/      # gen_plots.py + bench_main.c, workload.c (stubs, a implementar)
+├── tests/     # test_splay, test_disk, test_stats, test_lru, test_cache, test_concurrency
+├── docs/      # prototipo-splay.c — protótipo monolítico de referência (etapas 1–15)
+└── build/      # gerado pelo Makefile (binários + .dat dos testes); fora do Git
 ```
+
+> **`docs/prototipo-splay.c`** consolida o protótipo passo-a-passo que guiou o
+> estudo da splay (BST → rotações → splay → cache de páginas → políticas). É
+> material de referência/defesa; **não** entra no build da biblioteca.
 
 ## 8. Build e uso
 
 ```sh
-make            # compila tudo (sem warnings)
-make test       # roda a bateria de testes unitários
-make stress     # teste de estresse multithread (alvo do TSan)
-make clean      # limpa artefatos de build
+make            # compila a bateria de testes (sem warnings)
+make test       # compila e roda os testes unitários
+make asan       # mesma bateria sob AddressSanitizer + UBSan (vazamento/UB)
+make stress     # teste multithread sob ThreadSanitizer (data race)
+make clean      # limpa build/
 ```
+
+> **TSan e ASLR:** em alguns kernels o runtime do ThreadSanitizer aborta com
+> `unexpected memory mapping` por causa da aleatorização de memória. O alvo
+> `make stress` contorna isso rodando sob `setarch -R` (desliga o ASLR) quando
+> disponível — não altera a semântica do teste. Os artefatos de build ficam em
+> `build/` e são ignorados pelo Git.
 
 ## 9. Entregas
 
@@ -138,6 +171,13 @@ make clean      # limpa artefatos de build
 | **E2 — Núcleo de ED** | splay e LRU completas + cache sob mutex global | 40% |
 | **E3 — Núcleo de SO** | sharding (concorrência fina), multithread, write-back, TSan limpo | 10% |
 | **E4 — Robustez e relatório** | flush/close, teste de fogo, relatório experimental, defesa | 35% |
+
+**Estado atual:** os 5 módulos de `src/` (disk, splay, lru, stats, page_cache)
+estão implementados, com a bateria de 6 testes passando em `make test`, `make
+asan` e `make stress` (zero warnings, sem vazamento, sem data race). Já há pool
+de frames, *write-back* e sharding (esqueleto de E3). **Falta** a camada de
+benchmark (`bench/bench_main.c` + `bench/workload.c` ainda são *stubs*) e o
+relatório experimental (E4).
 
 ## 10. Métricas coletadas (para o relatório)
 
