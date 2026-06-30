@@ -20,7 +20,10 @@ BUILD   := build
 TESTS     := splay disk stats lru cache concurrency
 TEST_BINS := $(addprefix $(BUILD)/test_,$(TESTS))
 
-.PHONY: all test asan stress clean
+# Camada de benchmark (E4): driver + gerador de carga.
+BENCH_SRC := bench/bench_main.c bench/workload.c
+
+.PHONY: all test asan stress bench plots clean
 
 # Compila os testes ativos (sem rodar).
 all: $(TEST_BINS)
@@ -51,6 +54,19 @@ stress: $(BUILD)/test_concurrency_tsan
 
 $(BUILD)/test_concurrency_tsan: tests/test_concurrency.c $(SRC) | $(BUILD)
 	$(CC) $(CFLAGS) $(TSAN) $^ -o $@ $(LDFLAGS)
+
+# Compila E RODA o benchmark (gera os CSVs em build/ para o relatório).
+bench: $(BUILD)/bench
+	./$(BUILD)/bench
+
+# Roda o benchmark e gera os gráficos PNG (precisa de python3 + matplotlib).
+plots: $(BUILD)/bench
+	./$(BUILD)/bench
+	python3 bench/gen_plots.py
+
+# bench/ tem header próprio (workload.h) -> -Ibench além de -Iinclude.
+$(BUILD)/bench: $(BENCH_SRC) $(SRC) | $(BUILD)
+	$(CC) $(CFLAGS) -Ibench $^ -o $@ $(LDFLAGS)
 
 # Regra genérica: build/test_X  <-  tests/test_X.c + todos os src/*.c
 $(BUILD)/test_%: tests/test_%.c $(SRC) | $(BUILD)
