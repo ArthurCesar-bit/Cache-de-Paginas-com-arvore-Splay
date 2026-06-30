@@ -58,17 +58,14 @@ def plot_compare(rows):
     fig.savefig(out, dpi=120, bbox_inches="tight")
     print("escrito:", out)
 
-    # --- profundidade media (so faz sentido na splay) ---
+    # --- profundidade media (so faz sentido na splay; LRU nao tem arvore) ---
+    depths = [cell("avg_depth", w, "splay") for w in workloads]
     fig, ax = plt.subplots()
-    ax.bar([i - width / 2 for i in x], [cell("avg_depth", w, "splay") for w in workloads],
-           width, label="splay")
-    ax.bar([i + width / 2 for i in x], [cell("avg_depth", w, "lru") for w in workloads],
-           width, label="lru")
+    ax.bar(list(x), depths, width=0.6, color=["tab:blue", "tab:orange"])
     ax.set_xticks(list(x))
     ax.set_xticklabels(workloads)
     ax.set_ylabel("profundidade media de acesso")
-    ax.set_title("Profundidade media: splay vs LRU")
-    ax.legend()
+    ax.set_title("Profundidade media de acesso na splay")
     out = os.path.join(BUILD, "plot_avg_depth.png")
     fig.savefig(out, dpi=120, bbox_inches="tight")
     print("escrito:", out)
