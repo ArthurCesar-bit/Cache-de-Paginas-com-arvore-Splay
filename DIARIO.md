@@ -395,3 +395,99 @@ implementado. Próximo passo: fechar o primeiro verde.
       remover a página menos utilizada;
       ou remover a página mais profunda;
       ou implementar uma estratégia híbrida.
+
+---
+
+## Dia 2 — 30/06/2026
+
+### Consolidação do protótipo e decisão de arquitetura
+
+Os 15 snapshots incrementais do protótipo (`bench/bst.c`, `bst.c (1)` …
+`bst.c (14)`) eram estágios do **mesmo** programa, baixados etapa a etapa. A
+última versão (Etapa 15) já era o acumulado de tudo (BST → rotações → splay →
+cache de páginas → políticas LRU/LFU/híbrida). Consolidamos num único arquivo e
+o **movemos para `docs/prototipo-splay.c`** (com `git mv`), como material de
+referência/defesa — ele **não** entra no build da biblioteca.
+
+Diante de duas arquiteturas incompatíveis no repositório, decidimos o rumo:
+
+- **Design A — interfaces pré-definidas (`include/`)**: splay como índice
+  `pageno → frame`, camada de disco, pool de frames, LRU clássico como baseline,
+  fachada `page_cache` com sharding. É o projeto do edital.
+- **Design B — só reorganizar o monólito**: o nó *é* a página, sem disco, sem
+  threads, "LRU" = despejar o nó mais profundo.
+
+Optamos pelo **Design A**. Motivo registrado: o Design B feriria exigências do
+enunciado — o **baseline LRU clássico** (hash + lista), **todo o núcleo de SO**
+(cache de blocos multithread, write-back, sharding, TSan) e a separação
+**índice ≠ bytes**. O monólito fica preservado em `docs/` como referência de ED.
+
+### Saída da fase vermelha: `src/` implementado (TDD → verde)
+
+Implementamos os 5 módulos atrás das interfaces de `include/`, fechando o verde
+da bateria escrita no Dia 1:
+
+| Módulo | O que faz |
+|---|---|
+| `src/disk.c` | blocos de tamanho fixo via `pread`/`pwrite`; contadores de I/O **atômicos** (`stdatomic`) |
+| `src/splay.c` | índice `pageno→frame` autoajustável (zig/zig-zig/zig-zag); `out_depth` antes do splay; despejo da folha mais profunda |
+| `src/lru.c` | baseline LRU clássico (hash + lista duplamente encadeada) |
+| `src/stats.c` | hit ratio + profundidade média, sem divisão por zero |
+| `src/page_cache.c` | fachada `pc_*`; pool de frames + dirty bits; **write-back**; **sharding** (mutex/árvore/pool por shard) |
+
+Decisões de implementação:
+
+- **Despacho de política por `enum`, não por vtable.** A troca splay↔LRU é uma
+  camada fina (`pol_lookup`/`pol_insert`/`pol_evict`) que despacha por
+  `pc_policy_t`. Por isso `include/cache_policy.h` ficou **vazio** (a vtable do
+  README é refinamento opcional, ainda não usado).
+- **Extensão de `include/splay.h`** com `splay_evict_victim`, simétrica a
+  `lru_evict_victim` — necessária para o `page_cache` despejar a página fria.
+
+### Bugs e percalços
+
+- **Link falhando (esperado):** com `src/*.c` vazios, `make test` compilava sem
+  warning mas quebrava no link (`undefined reference to 'splay_create'…`). Era a
+  fase vermelha; resolvido ao implementar os módulos.
+- **TSan abortando com `unexpected memory mapping`:** **não era data race** — é
+  incompatibilidade do runtime do ThreadSanitizer com o ASLR deste kernel.
+  Contornado rodando o binário sob `setarch -R` (desliga o ASLR); ajustamos o
+  alvo `make stress` para usar `setarch -R` quando disponível.
+
+### Infra: `.gitignore`
+
+Criamos `.gitignore` (ignora `build/`, `*.o`, `*.dat`, `*.png`) — antes a pasta
+`build/` (binários + arquivos `.dat` dos testes) aparecia como não rastreada.
+
+### Estado ao fim da sessão
+
+`make test`, `make asan` e `make stress` **passando** — 6/6 testes, zero
+warnings, sem vazamento (ASan/UBSan) e sem data race (TSan). **Falta** a camada
+de benchmark (`bench/bench_main.c` e `bench/workload.c` ainda são stubs) e o
+relatório experimental (E4).
+
+### Uso de IA
+
+- **Ferramenta:** Claude Code (assistente de IA).
+- **Para que serviu:** consolidar os snapshots do protótipo; comparar as duas
+  arquiteturas; implementar os `src/*.c` atrás das interfaces; criar
+  `.gitignore`; ajustar o `Makefile`; atualizar `README.md` e este diário.
+  Serviu também para explicar conceitos (árvore splay, sharding, mutex, header
+  × implementação) com vistas à defesa oral.
+- **O que precisou de decisão/correção da equipe:**
+  - A IA chegou a **oferecer o Design B** (só reorganizar o monólito) como
+    opção. Pedimos a análise contra o edital; ela mesma apontou que B feria o
+    baseline LRU clássico e o núcleo de SO. A equipe então **fixou o Design A**.
+  - A IA tendeu a acoplar `stats` ao `page_cache`; mantivemos `stats` como
+    módulo isolado (testado por `test_stats`) e o `page_cache` com contadores
+    próprios sob o mutex do shard, para não reintroduzir estado compartilhado.
+  - Diante do erro do TSan, a IA primeiro tratou como possível race; a verificação
+    mostrou ser ambiente (ASLR), e a equipe validou o contorno com `setarch -R`.
+- **Prompts usados (resumo):**
+  - "junte todos os bst.c em um único arquivo com essas funcionalidades";
+  - "existe alguma forma de alterar minha arquitetura para satisfazer a
+    arquitetura pré-definida (bench/tests/src separados)? pode apagar os testes
+    se não forem necessários" → e, em seguida, "esse design fere algum princípio
+    do comando da atividade?";
+  - "siga com o caminho A e mova o bst.c para um arquivo de docs";
+  - "crie o gitignore"; "atualize o README.md / DIARIO.md com as decisões".
