@@ -3,7 +3,7 @@
 # gen_plots.py — gera os graficos do relatorio a partir dos CSVs
 # produzidos por build/bench (rode antes: ./build/bench).
 #
-#   build/bench_compare.csv  -> hit ratio e profundidade media
+#   build/bench_compare.csv  -> hit ratio (splay vs LRU)
 #   build/bench_threads.csv  -> vazao x numero de threads
 #
 # Saidas PNG em build/ (ignoradas pelo Git).
@@ -55,18 +55,6 @@ def plot_compare(rows):
     ax.set_title("Hit ratio: splay vs LRU")
     ax.legend()
     out = os.path.join(BUILD, "plot_hit_ratio.png")
-    fig.savefig(out, dpi=120, bbox_inches="tight")
-    print("escrito:", out)
-
-    # --- profundidade media (so faz sentido na splay; LRU nao tem arvore) ---
-    depths = [cell("avg_depth", w, "splay") for w in workloads]
-    fig, ax = plt.subplots()
-    ax.bar(list(x), depths, width=0.6, color=["tab:blue", "tab:orange"])
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(workloads)
-    ax.set_ylabel("profundidade media de acesso")
-    ax.set_title("Profundidade media de acesso na splay")
-    out = os.path.join(BUILD, "plot_avg_depth.png")
     fig.savefig(out, dpi=120, bbox_inches="tight")
     print("escrito:", out)
 
