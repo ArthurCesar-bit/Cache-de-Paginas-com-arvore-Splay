@@ -10,3 +10,5 @@ build/
 
 # Saídas do benchmark (gráficos)
 *.png
+
+.vscode/
